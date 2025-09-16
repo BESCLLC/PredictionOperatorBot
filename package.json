@@ -1,0 +1,14 @@
+{
+  "name": "prediction-bots",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start:oracle": "node oracle-bot.js",
+    "start:operator": "node operator-bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.0",
+    "ethers": "^6.7.0"
+  }
+}
