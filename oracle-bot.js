@@ -7,7 +7,7 @@ const {
   RPC_URL,
   ORACLE_ADDRESS,
   PRIVATE_KEY,
-  ASSET = 'binancecoin',
+  ASSET = 'bitcoin',
   INTERVAL = 60000
 } = process.env;
 
