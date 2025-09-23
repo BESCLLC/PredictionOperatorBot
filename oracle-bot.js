@@ -19,8 +19,11 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const oracle = new ethers.Contract(ORACLE_ADDRESS, OracleAbi, wallet);
 
+// always fetch price from Coingecko
 async function fetchPrice() {
-  const r = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${ASSET}&vs_currencies=usd`);
+  const r = await axios.get(
+    `https://api.coingecko.com/api/v3/simple/price?ids=${ASSET}&vs_currencies=usd`
+  );
   const price = r.data?.[ASSET]?.usd;
   if (!price) throw new Error("Price not found");
   return BigInt(Math.round(price * 1e8)); // scale to 1e8
@@ -30,7 +33,13 @@ async function updateOracle() {
   try {
     const price = await fetchPrice();
     console.log(`[oracle-bot] Price: $${Number(price) / 1e8}`);
-    const tx = await oracle.updatePrice(price);
+
+    // send with fixed gas settings
+    const tx = await oracle.updatePrice(price, {
+      gasLimit: 500000,
+      gasPrice: ethers.parseUnits("1000", "gwei")
+    });
+
     console.log(`[oracle-bot] Tx sent: ${tx.hash}`);
     await tx.wait();
     console.log(`[oracle-bot] ✅ Price updated`);
