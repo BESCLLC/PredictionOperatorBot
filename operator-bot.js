@@ -29,7 +29,13 @@ async function checkAndExecute() {
 
     if (lockTime > 0 && now > closeTime) {
       console.log(`[operator-bot] Executing round ${epoch.toString()}...`);
-      const tx = await prediction.executeRound({ gasLimit: GAS_LIMIT });
+      
+      // Force fixed gas settings
+      const tx = await prediction.executeRound({
+        gasLimit: Number(GAS_LIMIT),
+        gasPrice: ethers.parseUnits("1000", "gwei")
+      });
+
       console.log(`[operator-bot] Tx sent: ${tx.hash}`);
       await tx.wait();
       console.log(`[operator-bot] ✅ Round executed`);
