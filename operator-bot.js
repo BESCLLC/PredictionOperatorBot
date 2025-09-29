@@ -32,7 +32,7 @@ async function sleep(ms) {
 }
 
 async function sendTx(fn) {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 5; attempt++) { // Increased retries to 5
     try {
       const nonce = await provider.getTransactionCount(wallet.address, 'pending');
       const tx = await fn({
@@ -45,31 +45,12 @@ async function sendTx(fn) {
       return receipt;
     } catch (err) {
       console.error(`[operator-bot] ❌ Tx failed (try ${attempt}): ${err.message}`);
-      if (attempt === 3) {
+      if (attempt === 5) {
         console.error(`[operator-bot] ❌ Max retries reached for tx`);
         throw err;
       }
       await sleep(1000);
     }
-  }
-}
-
-// --- Recovery ---
-async function recover() {
-  console.log(`[operator-bot] 🛠️ Recovery started for epoch ${await prediction.currentEpoch()}`);
-  try {
-    const isPaused = await prediction.paused({ blockTag: 'latest' });
-    if (!isPaused) {
-      console.log('[operator-bot] 🛑 Pausing...');
-      await sendTx((opts) => prediction.pause(opts));
-    }
-    console.log('[operator-bot] ▶️ Unpausing...');
-    await sendTx((opts) => prediction.unpause(opts));
-    await bootstrapGenesis();
-  } catch (err) {
-    console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
-    await sleep(5000);
-    await recover(); // Retry after delay
   }
 }
 
@@ -126,11 +107,10 @@ async function tryExecute(epoch) {
     }
   }
 
-  // Only mark as handled if window is definitively missed
+  // Log missed epoch but don’t mark as handled to allow retries
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
-    console.log(`[operator-bot] ⏩ Missed epoch ${epoch}`);
-    lastHandledEpoch = epoch;
-    return false;
+    console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (waiting for oracle or next epoch)`);
+    return false; // Keep retrying until oracleCalled or new epoch
   }
 
   return false;
@@ -153,18 +133,19 @@ async function checkAndExecute() {
     const currentEpoch = Number(await prediction.currentEpoch({ blockTag: 'latest' }));
 
     // Prioritize current and next epoch, scan recent ones as fallback
-    for (const e of [currentEpoch, currentEpoch + 1, ...Array.from({ length: 5 }, (_, i) => currentEpoch - i - 1)]) {
+    for (const e of [currentEpoch, currentEpoch + 1, ...Array.from({ length: 3 }, (_, i) => currentEpoch - i - 1)]) {
       if (e > 0 && e > lastHandledEpoch) {
         const executed = await tryExecute(e);
-        if (executed) break; // Exit loop after successful execution
+        if (executed) {
+          lastHandledEpoch = e; // Update only on successful execution
+          break; // Exit loop after successful execution
+        }
       }
     }
 
-    // Check for stalled epochs and recover if needed
+    // Warn if epochs aren’t advancing
     if (currentEpoch <= lastHandledEpoch && currentEpoch > 0) {
-      console.log(`[operator-bot] ⚠️ Epoch not advancing (current: ${currentEpoch}, last: ${lastHandledEpoch})`);
-      const paused = await prediction.paused({ blockTag: 'latest' });
-      if (!paused) await recover();
+      console.warn(`[operator-bot] ⚠️ Epoch not advancing (current: ${currentEpoch}, last: ${lastHandledEpoch})`);
     }
   } catch (err) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
@@ -177,11 +158,12 @@ setInterval(async () => {
   try {
     const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
     const oracleRoundId = await prediction.oracleLatestRoundId();
-    console.log(`[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}`);
+    const paused = await prediction.paused({ blockTag: 'latest' });
+    console.log(`[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}`);
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 30000);
+}, 15000); // Check every 15s for faster detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
