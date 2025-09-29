@@ -130,7 +130,7 @@ async function tryExecute(epoch) {
     `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
   );
 
-  // Check previous round's closeTimestamp and lockTimestamp to diagnose _safeEndRound issues
+  // Check previous round's closeTimestamp and lockTimestamp
   let canEndPrevious = true;
   if (epoch >= 2) {
     const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
@@ -145,7 +145,7 @@ async function tryExecute(epoch) {
     }
   }
 
-  // Only execute within the first 5s of the 30-second window
+  // Execute within the first 5s of the 30-second window
   const EXECUTION_WINDOW_START = lockTime;
   const EXECUTION_WINDOW_END = lockTime + 5; // First 5s only
   if (lockTime > 0 && now >= EXECUTION_WINDOW_START && now <= EXECUTION_WINDOW_END && canEndPrevious) {
@@ -159,7 +159,7 @@ async function tryExecute(epoch) {
         `[operator-bot] Oracle check for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
       );
 
-      if (oracleCalled || (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance)) {
+      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
         console.log(`[operator-bot] ▶ Executing epoch ${epoch} (oracleCalled=${oracleCalled})`);
         txPending = true;
         lastAttemptedEpochs.set(epoch, now);
@@ -186,15 +186,15 @@ async function tryExecute(epoch) {
     }
   }
 
-  // Log missed epoch or oracle delay but don’t mark as handled
+  // Log missed epoch or oracle delay
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (outside execution window)`);
     return false; // Keep retrying
   }
 
-  if (lockTime > 0 && !oracleCalled) {
-    console.log(`[operator-bot] ⏳ Waiting for oracle update on epoch ${epoch}`);
-    return false; // Wait for oracle
+  if (lockTime > 0 && !oracleCalled && now < EXECUTION_WINDOW_START) {
+    console.log(`[operator-bot] ⏳ Waiting for execution window on epoch ${epoch}`);
+    return false; // Wait for window
   }
 
   if (!canEndPrevious) {
@@ -208,13 +208,17 @@ async function tryExecute(epoch) {
 // --- Recover stuck rounds ---
 async function recoverStuckRounds(currentEpoch) {
   const now = Math.floor(Date.now() / 1000);
-  for (let epoch = currentEpoch - 3; epoch <= currentEpoch; epoch++) {
+  for (let epoch = Math.max(currentEpoch - 5, 1); epoch <= currentEpoch; epoch++) {
     if (epoch <= lastHandledEpoch) continue;
 
     const round = await prediction.rounds(epoch, { blockTag: 'latest' });
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
     const oracleCalled = round.oracleCalled;
+
+    console.log(
+      `[operator-bot] Recovery check for epoch ${epoch}: lockTimestamp=${ts(lockTime)}, closeTimestamp=${ts(closeTime)}, oracleCalled=${oracleCalled}, now=${ts(now)}`
+    );
 
     if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS) && !oracleCalled) {
       try {
@@ -224,7 +228,7 @@ async function recoverStuckRounds(currentEpoch) {
         const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
         const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
         console.log(
-          `[operator-bot] Recovery check for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
+          `[operator-bot] Recovery oracle check for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
         );
 
         if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
@@ -266,11 +270,6 @@ async function checkAndExecute() {
 
     // Log oracleUpdateAllowance status
     console.log(`[operator-bot] OracleUpdateAllowance: ${Number(oracleUpdateAllowance)}s`);
-    if (Number(oracleUpdateAllowance) < 3600) {
-      console.warn(
-        `[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}s) is too small. Set to 3600s using admin wallet via Blockscout for reliability.`
-      );
-    }
 
     const bootstrapped = await bootstrapGenesis();
     if (bootstrapped) return;
