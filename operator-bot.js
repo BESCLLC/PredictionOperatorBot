@@ -32,7 +32,7 @@ async function sleep(ms) {
 }
 
 async function sendTx(fn) {
-  for (let attempt = 1; attempt <= 5; attempt++) { // Increased retries to 5
+  for (let attempt = 1; attempt <= 5; attempt++) {
     try {
       const nonce = await provider.getTransactionCount(wallet.address, 'pending');
       const tx = await fn({
@@ -107,10 +107,15 @@ async function tryExecute(epoch) {
     }
   }
 
-  // Log missed epoch but don’t mark as handled to allow retries
+  // Log missed epoch or oracle delay but don’t mark as handled
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (waiting for oracle or next epoch)`);
     return false; // Keep retrying until oracleCalled or new epoch
+  }
+
+  if (lockTime > 0 && !oracleCalled) {
+    console.log(`[operator-bot] ⏳ Waiting for oracle update on epoch ${epoch}`);
+    return false; // Wait for oracle
   }
 
   return false;
@@ -159,11 +164,14 @@ setInterval(async () => {
     const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
     const oracleRoundId = await prediction.oracleLatestRoundId();
     const paused = await prediction.paused({ blockTag: 'latest' });
-    console.log(`[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}`);
+    const latestRoundData = await prediction.oracle.latestRoundData();
+    console.log(
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, Oracle Data: { roundId: ${latestRoundData[0]}, price: ${latestRoundData[1]}, timestamp: ${ts(latestRoundData[3])} }`
+    );
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 15000); // Check every 15s for faster detection
+}, 10000); // Check every 10s for faster detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
