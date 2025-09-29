@@ -31,6 +31,7 @@ const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 
 let txPending = false;
 let lastHandledEpoch = 0;
+const lastAttemptedEpochs = new Map(); // Track last attempt time for each epoch
 
 // --- Helpers ---
 function ts(unix) {
@@ -108,25 +109,55 @@ async function bootstrapGenesis() {
 async function tryExecute(epoch) {
   if (epoch <= lastHandledEpoch) return false;
 
-  const round = await prediction.rounds(epoch, { blockTag: 'latest' });
   const now = Math.floor(Date.now() / 1000);
+  const lastAttempt = lastAttemptedEpochs.get(epoch) || 0;
+  const COOLDOWN_SECONDS = 15; // Prevent spamming executeRound
+  if (now - lastAttempt < COOLDOWN_SECONDS) {
+    console.log(`[operator-bot] ⏳ Skipping epoch ${epoch} due to cooldown (last attempt: ${ts(lastAttempt)})`);
+    return false;
+  }
+
+  const round = await prediction.rounds(epoch, { blockTag: 'latest' });
   const lockTime = Number(round.lockTimestamp);
-  let oracleCalled = round.oracleCalled;
+  const oracleCalled = round.oracleCalled;
 
   console.log(
     `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
   );
 
   // Check previous round's closeTimestamp to diagnose _safeEndRound issues
+  let canEndPrevious = true;
   if (epoch >= 2) {
     const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
     console.log(
       `[operator-bot] Previous round (epoch ${epoch - 2}): closeTimestamp=${ts(prevRound.closeTimestamp)}, oracleCalled=${prevRound.oracleCalled}`
     );
+    if (prevRound.closeTimestamp == 0 || now < Number(prevRound.closeTimestamp)) {
+      console.log(`[operator-bot] Cannot end epoch ${epoch - 2}: closeTimestamp=${ts(prevRound.closeTimestamp)}, now=${ts(now)}`);
+      canEndPrevious = false;
+    }
+  }
+
+  // Valid execution window and previous round can be ended
+  if (lockTime > 0 && oracleCalled && now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS) && canEndPrevious) {
+    console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
+    txPending = true;
+    lastAttemptedEpochs.set(epoch, now);
+    try {
+      const r = await sendTx((opts) => prediction.executeRound(opts));
+      console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
+      lastHandledEpoch = epoch;
+      txPending = false;
+      return true;
+    } catch (err) {
+      console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
+      txPending = false;
+      return false; // Retry on next loop
+    }
   }
 
   // If oracleCalled is false, try to fetch price to ensure oracle data is available
-  if (lockTime > 0 && !oracleCalled && now >= lockTime) {
+  if (lockTime > 0 && !oracleCalled && now >= lockTime && canEndPrevious) {
     try {
       const oracleData = await oracle.latestRoundData();
       const oracleRoundId = oracleData[0].toString();
@@ -138,6 +169,7 @@ async function tryExecute(epoch) {
         // Force executeRound to update oracle
         console.log(`[operator-bot] ▶ Forcing executeRound for epoch ${epoch} to update oracle`);
         txPending = true;
+        lastAttemptedEpochs.set(epoch, now);
         try {
           const r = await sendTx((opts) => prediction.executeRound(opts));
           console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
@@ -157,23 +189,6 @@ async function tryExecute(epoch) {
     }
   }
 
-  // Valid execution window
-  if (lockTime > 0 && oracleCalled && now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)) {
-    console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
-    txPending = true;
-    try {
-      const r = await sendTx((opts) => prediction.executeRound(opts));
-      console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
-      lastHandledEpoch = epoch;
-      txPending = false;
-      return true;
-    } catch (err) {
-      console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
-      txPending = false;
-      return false; // Retry on next loop
-    }
-  }
-
   // Log missed epoch or oracle delay but don’t mark as handled
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (waiting for oracle or next epoch)`);
@@ -183,6 +198,11 @@ async function tryExecute(epoch) {
   if (lockTime > 0 && !oracleCalled) {
     console.log(`[operator-bot] ⏳ Waiting for oracle update on epoch ${epoch}`);
     return false; // Wait for oracle
+  }
+
+  if (!canEndPrevious) {
+    console.log(`[operator-bot] ⏳ Waiting for previous round (epoch ${epoch - 2}) to be ended`);
+    return false; // Wait for previous round
   }
 
   return false;
