@@ -1,6 +1,6 @@
-import 'dotenv/config';
-import { ethers } from 'ethers';
-import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: "json" };
+require('dotenv').config();
+const { ethers } = require('ethers');
+const PredictionAbi = require('./abi/PancakePredictionV3.json');
 
 const {
   RPC_URL,
@@ -12,7 +12,7 @@ const {
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY) {
-  throw new Error("Missing RPC_URL, PREDICTION_ADDRESS, or OPERATOR_KEY");
+  throw new Error('Missing RPC_URL, PREDICTION_ADDRESS, or OPERATOR_KEY');
 }
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
@@ -23,15 +23,15 @@ let txPending = false;
 let lastHandledEpoch = 0;
 
 // --- Helpers ---
-function ts(unix: number) {
+function ts(unix) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
-async function sleep(ms: number) {
+async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function sendTx(fn: any) {
+async function sendTx(fn) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const gasPrice = await provider.getGasPrice();
@@ -46,9 +46,12 @@ async function sendTx(fn: any) {
       );
       const receipt = await tx.wait(2); // Wait for 2 confirmations
       return receipt;
-    } catch (err: any) {
+    } catch (err) {
       console.error(`[operator-bot] ❌ Tx failed (try ${attempt}): ${err.message}`);
-      if (attempt === 3) throw err;
+      if (attempt === 3) {
+        console.error(`[operator-bot] ❌ Max retries reached for tx`);
+        throw err;
+      }
       await sleep(1000);
     }
   }
@@ -58,15 +61,15 @@ async function sendTx(fn: any) {
 async function recover() {
   console.log(`[operator-bot] 🛠️ Recovery started for epoch ${await prediction.currentEpoch()}`);
   try {
-    const isPaused = await prediction.paused();
+    const isPaused = await prediction.paused({ blockTag: 'latest' });
     if (!isPaused) {
       console.log('[operator-bot] 🛑 Pausing...');
-      await sendTx((opts: any) => prediction.pause(opts));
+      await sendTx((opts) => prediction.pause(opts));
     }
     console.log('[operator-bot] ▶️ Unpausing...');
-    await sendTx((opts: any) => prediction.unpause(opts));
+    await sendTx((opts) => prediction.unpause(opts));
     await bootstrapGenesis();
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
     await sleep(5000);
     await recover(); // Retry after delay
@@ -81,14 +84,14 @@ async function bootstrapGenesis() {
 
   if (!startOnce) {
     console.log('[operator-bot] ⚡ genesisStartRound');
-    const r = await sendTx((opts: any) => prediction.genesisStartRound(opts));
+    const r = await sendTx((opts) => prediction.genesisStartRound(opts));
     console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
     await sleep(1000);
     return true;
   }
   if (startOnce && !lockOnce) {
     console.log('[operator-bot] ⚡ genesisLockRound');
-    const r = await sendTx((opts: any) => prediction.genesisLockRound(opts));
+    const r = await sendTx((opts) => prediction.genesisLockRound(opts));
     console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
     await sleep(1000);
     return true;
@@ -97,7 +100,7 @@ async function bootstrapGenesis() {
 }
 
 // --- Try execute an epoch ---
-async function tryExecute(epoch: number) {
+async function tryExecute(epoch) {
   if (epoch <= lastHandledEpoch) return false;
 
   const round = await prediction.rounds(epoch, { blockTag: 'latest' });
@@ -114,12 +117,12 @@ async function tryExecute(epoch: number) {
     console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
     txPending = true;
     try {
-      const r = await sendTx((opts: any) => prediction.executeRound(opts));
+      const r = await sendTx((opts) => prediction.executeRound(opts));
       console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
       lastHandledEpoch = epoch;
       txPending = false;
       return true;
-    } catch (err: any) {
+    } catch (err) {
       console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
       txPending = false;
       return false; // Retry on next loop
@@ -160,13 +163,13 @@ async function checkAndExecute() {
       }
     }
 
-    // Check for missed epochs and recover if stuck
+    // Check for stalled epochs and recover if needed
     if (currentEpoch <= lastHandledEpoch && currentEpoch > 0) {
       console.log(`[operator-bot] ⚠️ Epoch not advancing (current: ${currentEpoch}, last: ${lastHandledEpoch})`);
-      const paused = await prediction.paused();
+      const paused = await prediction.paused({ blockTag: 'latest' });
       if (!paused) await recover();
     }
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
     txPending = false;
   }
@@ -178,7 +181,7 @@ setInterval(async () => {
     const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
     const oracleRoundId = await prediction.oracleLatestRoundId();
     console.log(`[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}`);
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
 }, 30000);
@@ -188,11 +191,15 @@ provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err
 
 // Validate operator
 (async () => {
-  const operator = await prediction.operatorAddress();
-  if (operator !== wallet.address) {
-    console.error(`[operator-bot] ❌ Wallet ${wallet.address} is not operator (${operator})`);
-  } else {
-    console.log(`[operator-bot] ✅ Wallet ${wallet.address} is operator`);
+  try {
+    const operator = await prediction.operatorAddress();
+    if (operator !== wallet.address) {
+      console.error(`[operator-bot] ❌ Wallet ${wallet.address} is not operator (${operator})`);
+    } else {
+      console.log(`[operator-bot] ✅ Wallet ${wallet.address} is operator`);
+    }
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Operator check failed: ${err.message}`);
   }
 })();
 
