@@ -1,6 +1,6 @@
-require('dotenv').config();
-const { ethers } = require('ethers');
-const PredictionAbi = require('./abi/PancakePredictionV3.json');
+import 'dotenv/config';
+import { ethers } from 'ethers';
+import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: 'json' };
 
 const {
   RPC_URL,
