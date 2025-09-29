@@ -205,6 +205,52 @@ async function tryExecute(epoch) {
   return false;
 }
 
+// --- Recover stuck rounds ---
+async function recoverStuckRounds(currentEpoch) {
+  const now = Math.floor(Date.now() / 1000);
+  for (let epoch = currentEpoch - 3; epoch <= currentEpoch; epoch++) {
+    if (epoch <= lastHandledEpoch) continue;
+
+    const round = await prediction.rounds(epoch, { blockTag: 'latest' });
+    const lockTime = Number(round.lockTimestamp);
+    const closeTime = Number(round.closeTimestamp);
+    const oracleCalled = round.oracleCalled;
+
+    if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS) && !oracleCalled) {
+      try {
+        const oracleData = await oracle.latestRoundData();
+        const oracleRoundId = Number(oracleData[0]);
+        const oracleTimestamp = Number(oracleData[3]);
+        const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
+        const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
+        console.log(
+          `[operator-bot] Recovery check for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
+        );
+
+        if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
+          console.log(`[operator-bot] ▶ Recovering stuck epoch ${epoch}`);
+          txPending = true;
+          lastAttemptedEpochs.set(epoch, now);
+          try {
+            const r = await sendTx((opts) => prediction.executeRound(opts));
+            console.log(`[operator-bot] 🎯 Recovery success: epoch ${epoch} (${r.hash})`);
+            lastHandledEpoch = epoch;
+            txPending = false;
+            return true;
+          } catch (err) {
+            console.error(`[operator-bot] ❌ Recovery failed for epoch ${epoch}: ${err.message}`);
+            txPending = false;
+            return false;
+          }
+        }
+      } catch (err) {
+        console.error(`[operator-bot] ❌ Recovery oracle check failed for epoch ${epoch}: ${err.message}`);
+      }
+    }
+  }
+  return false;
+}
+
 // --- Main loop ---
 async function checkAndExecute() {
   if (txPending) return;
@@ -220,9 +266,9 @@ async function checkAndExecute() {
 
     // Log oracleUpdateAllowance status
     console.log(`[operator-bot] OracleUpdateAllowance: ${Number(oracleUpdateAllowance)}s`);
-    if (Number(oracleUpdateAllowance) < 100) {
+    if (Number(oracleUpdateAllowance) < 3600) {
       console.warn(
-        `[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}s) is too small. Set to 3600s (or at least 100s) using admin wallet via Blockscout for reliability.`
+        `[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}s) is too small. Set to 3600s using admin wallet via Blockscout for reliability.`
       );
     }
 
@@ -230,6 +276,10 @@ async function checkAndExecute() {
     if (bootstrapped) return;
 
     const currentEpoch = Number(await prediction.currentEpoch({ blockTag: 'latest' }));
+
+    // Try to recover stuck rounds
+    const recovered = await recoverStuckRounds(currentEpoch);
+    if (recovered) return;
 
     // Prioritize current and next epoch, scan recent ones as fallback
     for (const e of [currentEpoch, currentEpoch + 1, ...Array.from({ length: 3 }, (_, i) => currentEpoch - i - 1)]) {
@@ -276,7 +326,7 @@ setInterval(async () => {
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 3000); // Check every 3s for fast detection
+}, 3000); // Check every 3s for faster detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
