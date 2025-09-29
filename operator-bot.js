@@ -121,7 +121,7 @@ async function tryExecute(epoch) {
       const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
       if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + Number(await prediction.oracleUpdateAllowance())) {
         console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}`);
-        // oracleCalled should be true after executeRound or genesisLockRound processes this
+        // oracleCalled should be true after executeRound processes this
       }
     } catch (err) {
       console.error(`[operator-bot] ❌ Oracle check failed for epoch ${epoch}: ${err.message}`);
@@ -210,12 +210,12 @@ setInterval(async () => {
     const oracleData = await oracle.latestRoundData();
     const round = await prediction.rounds(epoch, { blockTag: 'latest' });
     console.log(
-      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }, Current Round: { lockTimestamp: ${ts(round.lockTimestamp)}, oracleCalled: ${round.oracleCalled} }`
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }, Current Round: { lockTimestamp: ${ts(round.lockTimestamp)}, oracleCalled: ${round.oracleCalled}, startTimestamp: ${ts(round.startTimestamp)}, closeTimestamp: ${ts(round.closeTimestamp)} }`
     );
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 10000); // Check every 10s for fast detection
+}, 5000); // Check every 5s for faster detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
