@@ -34,16 +34,13 @@ async function sleep(ms) {
 async function sendTx(fn) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const gasPrice = await provider.getGasPrice();
       const nonce = await provider.getTransactionCount(wallet.address, 'pending');
       const tx = await fn({
         gasLimit: Number(GAS_LIMIT),
-        gasPrice,
+        gasPrice: ethers.parseUnits('1000', 'gwei'), // Fixed 1000 Gwei
         nonce,
       });
-      console.log(
-        `[operator-bot] 🚀 Tx sent: ${tx.hash}, nonce: ${nonce}, gasPrice: ${ethers.formatUnits(gasPrice, 'gwei')} Gwei`
-      );
+      console.log(`[operator-bot] 🚀 Tx sent: ${tx.hash}, nonce: ${nonce}, gasPrice: 1000 Gwei`);
       const receipt = await tx.wait(2); // Wait for 2 confirmations
       return receipt;
     } catch (err) {
