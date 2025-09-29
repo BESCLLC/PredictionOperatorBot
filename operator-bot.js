@@ -6,7 +6,7 @@ const {
   RPC_URL,
   OPERATOR_KEY,
   PREDICTION_ADDRESS,
-  ORACLE_ADDRESS, // Add oracle address to .env
+  ORACLE_ADDRESS,
   CHECK_INTERVAL = 1000, // 1s for tight polling
   GAS_LIMIT = 500000,
   BUFFER_SECONDS = 30,   // Must match contract
@@ -151,6 +151,7 @@ async function checkAndExecute() {
     // Validate configuration
     const contractBuffer = await prediction.bufferSeconds();
     const intervalSeconds = await prediction.intervalSeconds();
+    const oracleUpdateAllowance = await prediction.oracleUpdateAllowance();
     if (Number(contractBuffer) !== Number(BUFFER_SECONDS)) {
       console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
@@ -189,9 +190,11 @@ setInterval(async () => {
     const paused = await prediction.paused({ blockTag: 'latest' });
     const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
     const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
+    const oracleUpdateAllowance = await prediction.oracleUpdateAllowance();
     const oracleData = await oracle.latestRoundData();
+    const round = await prediction.rounds(epoch, { blockTag: 'latest' });
     console.log(
-      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }`
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }, Current Round: { lockTimestamp: ${ts(round.lockTimestamp)}, oracleCalled: ${round.oracleCalled} }`
     );
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
