@@ -117,6 +117,14 @@ async function tryExecute(epoch) {
     `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
   );
 
+  // Check previous round's closeTimestamp to diagnose _safeEndRound issues
+  if (epoch >= 2) {
+    const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
+    console.log(
+      `[operator-bot] Previous round (epoch ${epoch - 2}): closeTimestamp=${ts(prevRound.closeTimestamp)}, oracleCalled=${prevRound.oracleCalled}`
+    );
+  }
+
   // If oracleCalled is false, try to fetch price to ensure oracle data is available
   if (lockTime > 0 && !oracleCalled && now >= lockTime) {
     try {
@@ -124,9 +132,10 @@ async function tryExecute(epoch) {
       const oracleRoundId = oracleData[0].toString();
       const oracleTimestamp = Number(oracleData[3]);
       const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
-      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + Number(await prediction.oracleUpdateAllowance())) {
-        console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}`);
-        // Try executeRound to force oracle update
+      const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
+      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
+        console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`);
+        // Force executeRound to update oracle
         console.log(`[operator-bot] ▶ Forcing executeRound for epoch ${epoch} to update oracle`);
         txPending = true;
         try {
@@ -140,6 +149,8 @@ async function tryExecute(epoch) {
           txPending = false;
           return false; // Retry on next loop
         }
+      } else {
+        console.log(`[operator-bot] Oracle data invalid for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`);
       }
     } catch (err) {
       console.error(`[operator-bot] ❌ Oracle check failed for epoch ${epoch}: ${err.message}`);
@@ -190,6 +201,22 @@ async function checkAndExecute() {
       console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
 
+    // Update oracleUpdateAllowance if too small
+    if (Number(oracleUpdateAllowance) < 3600) {
+      console.warn(`[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}) is too small, attempting to update to 3600s`);
+      try {
+        const tx = await prediction.setOracleUpdateAllowance(3600, {
+          gasLimit: 200000,
+          gasPrice: ethers.parseUnits('1000', 'gwei'),
+        });
+        console.log(`[operator-bot] Set oracleUpdateAllowance tx: ${tx.hash}`);
+        await tx.wait(2);
+        console.log(`[operator-bot] ✅ oracleUpdateAllowance updated to 3600s`);
+      } catch (err) {
+        console.error(`[operator-bot] ❌ Failed to update oracleUpdateAllowance: ${err.message}`);
+      }
+    }
+
     const bootstrapped = await bootstrapGenesis();
     if (bootstrapped) return;
 
@@ -230,6 +257,13 @@ setInterval(async () => {
     console.log(
       `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }, Current Round: { lockTimestamp: ${ts(round.lockTimestamp)}, oracleCalled: ${round.oracleCalled}, startTimestamp: ${ts(round.startTimestamp)}, closeTimestamp: ${ts(round.closeTimestamp)} }`
     );
+    // Log previous round to diagnose _safeEndRound
+    if (epoch >= 2) {
+      const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
+      console.log(
+        `[operator-bot] Previous Round (epoch ${epoch - 2}): closeTimestamp=${ts(prevRound.closeTimestamp)}, oracleCalled=${prevRound.oracleCalled}`
+      );
+    }
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
