@@ -34,7 +34,7 @@ let lastHandledEpoch = 0;
 
 // --- Helpers ---
 function ts(unix) {
-  return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
+  return new Date(Number(unix) * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
 async function sleep(ms) {
@@ -191,7 +191,7 @@ setInterval(async () => {
     const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
     const oracleData = await oracle.latestRoundData();
     console.log(
-      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, Oracle Data: { roundId: ${oracleData[0]}, price: ${oracleData[1]}, timestamp: ${ts(oracleData[3])} }`
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }`
     );
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
