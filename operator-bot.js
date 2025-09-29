@@ -220,8 +220,8 @@ async function recoverStuckRounds(currentEpoch) {
       `[operator-bot] Recovery check for epoch ${epoch}: lockTimestamp=${ts(lockTime)}, closeTimestamp=${ts(closeTime)}, oracleCalled=${oracleCalled}, now=${ts(now)}`
     );
 
-    // Attempt recovery for epochs with valid lock and close timestamps
-    if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS) && !oracleCalled) {
+    // Attempt recovery for epochs with valid lock and close timestamps within the closeTimestamp window
+    if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS)) {
       try {
         const oracleData = await oracle.latestRoundData();
         const oracleRoundId = Number(oracleData[0]);
