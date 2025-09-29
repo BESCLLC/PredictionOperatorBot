@@ -220,6 +220,7 @@ async function recoverStuckRounds(currentEpoch) {
       `[operator-bot] Recovery check for epoch ${epoch}: lockTimestamp=${ts(lockTime)}, closeTimestamp=${ts(closeTime)}, oracleCalled=${oracleCalled}, now=${ts(now)}`
     );
 
+    // Attempt recovery for epochs with valid lock and close timestamps
     if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS) && !oracleCalled) {
       try {
         const oracleData = await oracle.latestRoundData();
@@ -325,7 +326,7 @@ setInterval(async () => {
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 3000); // Check every 3s for faster detection
+}, 3000); // Check every 3s for fast detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
