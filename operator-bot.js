@@ -106,11 +106,27 @@ async function tryExecute(epoch) {
   const round = await prediction.rounds(epoch, { blockTag: 'latest' });
   const now = Math.floor(Date.now() / 1000);
   const lockTime = Number(round.lockTimestamp);
-  const oracleCalled = round.oracleCalled;
+  let oracleCalled = round.oracleCalled;
 
   console.log(
     `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
   );
+
+  // If oracleCalled is false, try to fetch price to ensure oracle data is available
+  if (lockTime > 0 && !oracleCalled && now >= lockTime) {
+    try {
+      const oracleData = await oracle.latestRoundData();
+      const oracleRoundId = oracleData[0].toString();
+      const oracleTimestamp = Number(oracleData[3]);
+      const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
+      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + Number(await prediction.oracleUpdateAllowance())) {
+        console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}`);
+        // oracleCalled should be true after executeRound or genesisLockRound processes this
+      }
+    } catch (err) {
+      console.error(`[operator-bot] ❌ Oracle check failed for epoch ${epoch}: ${err.message}`);
+    }
+  }
 
   // Valid execution window
   if (lockTime > 0 && oracleCalled && now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)) {
