@@ -8,7 +8,7 @@ const {
   ORACLE_ADDRESS,
   PRIVATE_KEY,
   ASSET = 'bitcoin',
-  INTERVAL = 60000
+  INTERVAL = 30000
 } = process.env;
 
 if (!RPC_URL || !ORACLE_ADDRESS || !PRIVATE_KEY) {
