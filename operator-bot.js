@@ -90,10 +90,15 @@ async function bootstrapGenesis() {
     }
 
     console.log('[operator-bot] ⚡ genesisLockRound');
-    const r = await sendTx((opts) => prediction.genesisLockRound(opts));
-    console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
-    await sleep(1000);
-    return true;
+    try {
+      const r = await sendTx((opts) => prediction.genesisLockRound(opts));
+      console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
+      await sleep(1000);
+      return true;
+    } catch (err) {
+      console.error(`[operator-bot] ❌ genesisLockRound failed: ${err.message}`);
+      return false; // Retry on next loop
+    }
   }
 
   return false;
@@ -121,7 +126,20 @@ async function tryExecute(epoch) {
       const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
       if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + Number(await prediction.oracleUpdateAllowance())) {
         console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}`);
-        // oracleCalled should be true after executeRound processes this
+        // Try executeRound to force oracle update
+        console.log(`[operator-bot] ▶ Forcing executeRound for epoch ${epoch} to update oracle`);
+        txPending = true;
+        try {
+          const r = await sendTx((opts) => prediction.executeRound(opts));
+          console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
+          lastHandledEpoch = epoch;
+          txPending = false;
+          return true;
+        } catch (err) {
+          console.error(`[operator-bot] ❌ Forced executeRound failed for epoch ${epoch}: ${err.message}`);
+          txPending = false;
+          return false; // Retry on next loop
+        }
       }
     } catch (err) {
       console.error(`[operator-bot] ❌ Oracle check failed for epoch ${epoch}: ${err.message}`);
@@ -215,7 +233,7 @@ setInterval(async () => {
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 5000); // Check every 5s for faster detection
+}, 3000); // Check every 3s for faster detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
