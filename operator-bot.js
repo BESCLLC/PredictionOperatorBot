@@ -6,9 +6,10 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 30000,
+  CHECK_INTERVAL = 5000, // run every 5s (instead of 30s)
   GAS_LIMIT = 500000,
   BUFFER_SECONDS = 30, // must match contract setting
+  SAFE_DELAY = 2, // extra seconds after lock before executing
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -26,20 +27,23 @@ function ts(unix) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
-// --- Utility: send tx safely ---
+// --- Utility: send tx safely with retry ---
 async function sendTx(fn) {
-  try {
-    const tx = await fn({
-      gasLimit: Number(GAS_LIMIT),
-      maxFeePerGas: ethers.parseUnits("2000", "gwei"),
-      maxPriorityFeePerGas: ethers.parseUnits("50", "gwei"),
-    });
-    console.log(`[operator-bot] Tx sent: ${tx.hash}`);
-    const receipt = await tx.wait();
-    return receipt;
-  } catch (err) {
-    console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const tx = await fn({
+        gasLimit: Number(GAS_LIMIT),
+        maxFeePerGas: ethers.parseUnits("2000", "gwei"),
+        maxPriorityFeePerGas: ethers.parseUnits("50", "gwei"),
+      });
+      console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+      const receipt = await tx.wait();
+      return receipt;
+    } catch (err) {
+      console.error(`[operator-bot] ❌ Error sending tx (try ${attempt}): ${err.message}`);
+      if (attempt === 3) throw err;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 }
 
@@ -80,10 +84,11 @@ async function checkAndExecute() {
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
+    // ✅ Execute right after lock + SAFE_DELAY
     if (
-      closeTime > 0 &&
-      now >= closeTime &&
-      now <= closeTime + Number(BUFFER_SECONDS)
+      lockTime > 0 &&
+      now >= lockTime + Number(SAFE_DELAY) &&
+      now <= lockTime + Number(BUFFER_SECONDS)
     ) {
       console.log(
         `[operator-bot] Executing round ${epoch.toString()}... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
@@ -92,9 +97,9 @@ async function checkAndExecute() {
       const receipt = await sendTx((opts) => prediction.executeRound(opts));
       console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
       txPending = false;
-    } else if (closeTime > 0 && now > closeTime + Number(BUFFER_SECONDS)) {
+    } else if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
       console.log(
-        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (close=${ts(closeTime)}). Skipping...`
+        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (lock=${ts(lockTime)}). Skipping...`
       );
     } else {
       console.log(
