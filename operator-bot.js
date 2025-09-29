@@ -8,6 +8,7 @@ const {
   PRIVATE_KEY,
   CHECK_INTERVAL = 30000,
   GAS_LIMIT = 500000,
+  BUFFER_SECONDS = 30, // match your contract bufferSeconds
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -20,6 +21,9 @@ const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet
 
 // Hard floor = 1000 gwei
 const MIN_GAS_PRICE = ethers.parseUnits("1000", "gwei");
+
+// Prevent overlapping transactions
+let txPending = false;
 
 // ---------- GENESIS BOOTSTRAP ----------
 async function bootstrapGenesis() {
@@ -45,34 +49,66 @@ async function bootstrapGenesis() {
 
 // ---------- SAFE TX SENDER ----------
 async function sendTx(fn) {
-  try {
-    let feeData = await provider.getFeeData();
+  let attempt = 0;
+  let gasPrice = MIN_GAS_PRICE;
 
-    // Default to RPC gasPrice if missing
-    let gasPrice = feeData.gasPrice || MIN_GAS_PRICE;
+  while (attempt < 5) {
+    try {
+      // ask RPC for suggestion, but enforce minimum
+      const feeData = await provider.getFeeData();
+      if (feeData.gasPrice && feeData.gasPrice > gasPrice) {
+        gasPrice = feeData.gasPrice;
+      }
+      if (gasPrice < MIN_GAS_PRICE) gasPrice = MIN_GAS_PRICE;
 
-    // Enforce 1000 gwei minimum
-    if (gasPrice < MIN_GAS_PRICE) {
-      gasPrice = MIN_GAS_PRICE;
+      const overrides = {
+        gasLimit: Number(GAS_LIMIT),
+        gasPrice,
+      };
+
+      console.log(
+        `[operator-bot] 🚀 Sending tx with gasPrice=${ethers.formatUnits(
+          gasPrice,
+          "gwei"
+        )} gwei`
+      );
+
+      const tx = await fn()(overrides);
+      console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+      await tx.wait();
+      return tx;
+    } catch (err) {
+      if (
+        err.code === "REPLACEMENT_UNDERPRICED" ||
+        (err.message && err.message.includes("replacement fee too low"))
+      ) {
+        // bump gas by +50 gwei
+        gasPrice = gasPrice + ethers.parseUnits("50", "gwei");
+        console.log(
+          `[operator-bot] ⬆️ Replacement underpriced, bumping gas to ${ethers.formatUnits(
+            gasPrice,
+            "gwei"
+          )} gwei`
+        );
+        attempt++;
+        continue;
+      } else {
+        console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
+        throw err;
+      }
     }
-
-    const overrides = {
-      gasLimit: Number(GAS_LIMIT),
-      gasPrice,
-    };
-
-    const tx = await fn()(overrides);
-    console.log(`[operator-bot] Tx sent: ${tx.hash}`);
-    await tx.wait();
-    return tx;
-  } catch (err) {
-    console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
-    throw err;
   }
+
+  throw new Error("Failed after 5 attempts");
 }
 
 // ---------- MAIN LOOP ----------
 async function checkAndExecute() {
+  if (txPending) {
+    console.log("[operator-bot] Skipping: tx still pending...");
+    return;
+  }
+
   try {
     const didBootstrap = await bootstrapGenesis();
     if (didBootstrap) return;
@@ -84,15 +120,20 @@ async function checkAndExecute() {
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
-    if (lockTime > 0 && now > closeTime) {
+    if (lockTime > 0 && now >= closeTime + Number(BUFFER_SECONDS)) {
       console.log(`[operator-bot] Executing round ${epoch.toString()}...`);
+      txPending = true;
       const tx = await sendTx(() => prediction.executeRound);
       console.log(`[operator-bot] ✅ Round executed (${tx.hash})`);
+      txPending = false;
     } else {
-      console.log(`[operator-bot] Waiting... now=${now} lock=${lockTime} close=${closeTime}`);
+      console.log(
+        `[operator-bot] Waiting... now=${now} lock=${lockTime} close=${closeTime}`
+      );
     }
   } catch (e) {
     console.error(`[operator-bot] ❌ Error: ${e.message}`);
+    txPending = false;
   }
 }
 
