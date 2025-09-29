@@ -267,11 +267,11 @@ async function checkAndExecute() {
 setInterval(async () => {
   try {
     const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
-    const oracleRoundId = await prediction.oracleLatestRoundId();
+    const oracleRoundId = Number(await prediction.oracleLatestRoundId());
     const paused = await prediction.paused({ blockTag: 'latest' });
     const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
     const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
-    const oracleUpdateAllowance = await prediction.oracleUpdateAllowance();
+    const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
     const oracleData = await oracle.latestRoundData();
     const round = await prediction.rounds(epoch, { blockTag: 'latest' });
     console.log(
