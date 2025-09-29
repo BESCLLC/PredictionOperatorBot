@@ -4,11 +4,11 @@ import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: "json"
 
 const {
   RPC_URL,
-  OPERATOR_KEY,            // different wallet from oracle
+  OPERATOR_KEY,
   PREDICTION_ADDRESS,
-  CHECK_INTERVAL = 5000,   // check every 5s
+  CHECK_INTERVAL = 1000, // 1s for tight polling
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,     // must match contract
+  BUFFER_SECONDS = 30,   // Must match contract
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY) {
@@ -27,31 +27,70 @@ function ts(unix: number) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function sendTx(fn: any) {
-  const tx = await fn({
-    gasLimit: Number(GAS_LIMIT),
-    gasPrice: ethers.parseUnits("1000", "gwei"), // locked gas
-  });
-  console.log(`[operator-bot] 🚀 Tx sent: ${tx.hash}`);
-  const receipt = await tx.wait();
-  return receipt;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const gasPrice = await provider.getGasPrice();
+      const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+      const tx = await fn({
+        gasLimit: Number(GAS_LIMIT),
+        gasPrice,
+        nonce,
+      });
+      console.log(
+        `[operator-bot] 🚀 Tx sent: ${tx.hash}, nonce: ${nonce}, gasPrice: ${ethers.formatUnits(gasPrice, 'gwei')} Gwei`
+      );
+      const receipt = await tx.wait(2); // Wait for 2 confirmations
+      return receipt;
+    } catch (err: any) {
+      console.error(`[operator-bot] ❌ Tx failed (try ${attempt}): ${err.message}`);
+      if (attempt === 3) throw err;
+      await sleep(1000);
+    }
+  }
+}
+
+// --- Recovery ---
+async function recover() {
+  console.log(`[operator-bot] 🛠️ Recovery started for epoch ${await prediction.currentEpoch()}`);
+  try {
+    const isPaused = await prediction.paused();
+    if (!isPaused) {
+      console.log('[operator-bot] 🛑 Pausing...');
+      await sendTx((opts: any) => prediction.pause(opts));
+    }
+    console.log('[operator-bot] ▶️ Unpausing...');
+    await sendTx((opts: any) => prediction.unpause(opts));
+    await bootstrapGenesis();
+  } catch (err: any) {
+    console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
+    await sleep(5000);
+    await recover(); // Retry after delay
+  }
 }
 
 // --- Genesis bootstrap ---
 async function bootstrapGenesis() {
-  const startOnce = await prediction.genesisStartOnce();
-  const lockOnce = await prediction.genesisLockOnce();
+  const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
+  const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
+  console.log(`[operator-bot] Genesis - StartOnce: ${startOnce}, LockOnce: ${lockOnce}`);
 
   if (!startOnce) {
-    console.log(`[operator-bot] ⚡ genesisStartRound`);
+    console.log('[operator-bot] ⚡ genesisStartRound');
     const r = await sendTx((opts: any) => prediction.genesisStartRound(opts));
     console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
+    await sleep(1000);
     return true;
   }
   if (startOnce && !lockOnce) {
-    console.log(`[operator-bot] ⚡ genesisLockRound`);
+    console.log('[operator-bot] ⚡ genesisLockRound');
     const r = await sendTx((opts: any) => prediction.genesisLockRound(opts));
     console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
+    await sleep(1000);
     return true;
   }
   return false;
@@ -61,39 +100,37 @@ async function bootstrapGenesis() {
 async function tryExecute(epoch: number) {
   if (epoch <= lastHandledEpoch) return false;
 
-  const round = await prediction.rounds(epoch);
+  const round = await prediction.rounds(epoch, { blockTag: 'latest' });
   const now = Math.floor(Date.now() / 1000);
-
   const lockTime = Number(round.lockTimestamp);
   const oracleCalled = round.oracleCalled;
 
-  // valid execution window
-  if (
-    lockTime > 0 &&
-    oracleCalled &&
-    now >= lockTime &&
-    now <= lockTime + Number(BUFFER_SECONDS)
-  ) {
-    console.log(`[operator-bot] ▶ Executing epoch ${epoch} now=${ts(now)}`);
+  console.log(
+    `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
+  );
+
+  // Valid execution window
+  if (lockTime > 0 && oracleCalled && now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)) {
+    console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
     txPending = true;
     try {
       const r = await sendTx((opts: any) => prediction.executeRound(opts));
       console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
       lastHandledEpoch = epoch;
-    } catch (e: any) {
-      console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${e.message}`);
-      // keep retrying until buffer expires
       txPending = false;
-      return false;
+      return true;
+    } catch (err: any) {
+      console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
+      txPending = false;
+      return false; // Retry on next loop
     }
-    txPending = false;
-    return true;
   }
 
-  // expired -> mark handled so we don't spam old ones
+  // Only mark as handled if window is definitively missed
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch}`);
     lastHandledEpoch = epoch;
+    return false;
   }
 
   return false;
@@ -104,22 +141,60 @@ async function checkAndExecute() {
   if (txPending) return;
 
   try {
+    // Validate configuration
+    const contractBuffer = await prediction.bufferSeconds();
+    if (Number(contractBuffer) !== Number(BUFFER_SECONDS)) {
+      console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
+    }
+
     const bootstrapped = await bootstrapGenesis();
     if (bootstrapped) return;
 
-    const currentEpoch = Number(await prediction.currentEpoch());
+    const currentEpoch = Number(await prediction.currentEpoch({ blockTag: 'latest' }));
 
-    // 🔥 scan wider range: last 5 → current → next
-    for (let e = currentEpoch - 5; e <= currentEpoch + 1; e++) {
-      if (e > 0) {
-        await tryExecute(e);
+    // Prioritize current and next epoch, scan recent ones as fallback
+    for (const e of [currentEpoch, currentEpoch + 1, ...Array.from({ length: 5 }, (_, i) => currentEpoch - i - 1)]) {
+      if (e > 0 && e > lastHandledEpoch) {
+        const executed = await tryExecute(e);
+        if (executed) break; // Exit loop after successful execution
       }
+    }
+
+    // Check for missed epochs and recover if stuck
+    if (currentEpoch <= lastHandledEpoch && currentEpoch > 0) {
+      console.log(`[operator-bot] ⚠️ Epoch not advancing (current: ${currentEpoch}, last: ${lastHandledEpoch})`);
+      const paused = await prediction.paused();
+      if (!paused) await recover();
     }
   } catch (err: any) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
     txPending = false;
   }
 }
+
+// --- Monitoring ---
+setInterval(async () => {
+  try {
+    const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
+    const oracleRoundId = await prediction.oracleLatestRoundId();
+    console.log(`[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}`);
+  } catch (err: any) {
+    console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
+  }
+}, 30000);
+
+// Monitor RPC health
+provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
+
+// Validate operator
+(async () => {
+  const operator = await prediction.operatorAddress();
+  if (operator !== wallet.address) {
+    console.error(`[operator-bot] ❌ Wallet ${wallet.address} is not operator (${operator})`);
+  } else {
+    console.log(`[operator-bot] ✅ Wallet ${wallet.address} is operator`);
+  }
+})();
 
 console.log(`[operator-bot] Starting with wallet ${wallet.address}...`);
 checkAndExecute();
