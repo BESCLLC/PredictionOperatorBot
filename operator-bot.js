@@ -73,10 +73,15 @@ async function bootstrapGenesis() {
 
   if (!startOnce) {
     console.log('[operator-bot] ⚡ genesisStartRound');
-    const r = await sendTx((opts) => prediction.genesisStartRound(opts));
-    console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
-    await sleep(1000);
-    return true;
+    try {
+      const r = await sendTx((opts) => prediction.genesisStartRound(opts));
+      console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
+      await sleep(1000);
+      return true;
+    } catch (err) {
+      console.error(`[operator-bot] ❌ genesisStartRound failed: ${err.message}`);
+      return false; // Retry on next loop
+    }
   }
 
   if (startOnce && !lockOnce) {
@@ -111,7 +116,7 @@ async function tryExecute(epoch) {
 
   const now = Math.floor(Date.now() / 1000);
   const lastAttempt = lastAttemptedEpochs.get(epoch) || 0;
-  const COOLDOWN_SECONDS = 15; // Prevent spamming executeRound
+  const COOLDOWN_SECONDS = 30; // Prevent retries within the same window
   if (now - lastAttempt < COOLDOWN_SECONDS) {
     console.log(`[operator-bot] ⏳ Skipping epoch ${epoch} due to cooldown (last attempt: ${ts(lastAttempt)})`);
     return false;
@@ -125,49 +130,37 @@ async function tryExecute(epoch) {
     `[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}, In window=${now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS)}`
   );
 
-  // Check previous round's closeTimestamp to diagnose _safeEndRound issues
+  // Check previous round's closeTimestamp and lockTimestamp to diagnose _safeEndRound issues
   let canEndPrevious = true;
   if (epoch >= 2) {
     const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
     console.log(
-      `[operator-bot] Previous round (epoch ${epoch - 2}): closeTimestamp=${ts(prevRound.closeTimestamp)}, oracleCalled=${prevRound.oracleCalled}`
+      `[operator-bot] Previous round (epoch ${epoch - 2}): closeTimestamp=${ts(Number(prevRound.closeTimestamp))}, lockTimestamp=${ts(Number(prevRound.lockTimestamp))}, oracleCalled=${prevRound.oracleCalled}`
     );
-    if (prevRound.closeTimestamp == 0 || now < Number(prevRound.closeTimestamp)) {
-      console.log(`[operator-bot] Cannot end epoch ${epoch - 2}: closeTimestamp=${ts(prevRound.closeTimestamp)}, now=${ts(now)}`);
+    if (prevRound.closeTimestamp == 0 || prevRound.lockTimestamp == 0 || now < Number(prevRound.closeTimestamp)) {
+      console.log(
+        `[operator-bot] Cannot end epoch ${epoch - 2}: closeTimestamp=${ts(Number(prevRound.closeTimestamp))}, lockTimestamp=${ts(Number(prevRound.lockTimestamp))}, now=${ts(now)}`
+      );
       canEndPrevious = false;
     }
   }
 
-  // Valid execution window and previous round can be ended
-  if (lockTime > 0 && oracleCalled && now >= lockTime && now <= lockTime + Number(BUFFER_SECONDS) && canEndPrevious) {
-    console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
-    txPending = true;
-    lastAttemptedEpochs.set(epoch, now);
-    try {
-      const r = await sendTx((opts) => prediction.executeRound(opts));
-      console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
-      lastHandledEpoch = epoch;
-      txPending = false;
-      return true;
-    } catch (err) {
-      console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
-      txPending = false;
-      return false; // Retry on next loop
-    }
-  }
-
-  // If oracleCalled is false, try to fetch price to ensure oracle data is available
-  if (lockTime > 0 && !oracleCalled && now >= lockTime && canEndPrevious) {
+  // Only execute within the first 5s of the 30-second window
+  const EXECUTION_WINDOW_START = lockTime;
+  const EXECUTION_WINDOW_END = lockTime + 5; // First 5s only
+  if (lockTime > 0 && now >= EXECUTION_WINDOW_START && now <= EXECUTION_WINDOW_END && canEndPrevious) {
     try {
       const oracleData = await oracle.latestRoundData();
       const oracleRoundId = Number(oracleData[0]);
       const oracleTimestamp = Number(oracleData[3]);
       const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
       const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
-      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
-        console.log(`[operator-bot] Oracle data available for epoch ${epoch}: roundId=${oracleRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`);
-        // Force executeRound to update oracle
-        console.log(`[operator-bot] ▶ Forcing executeRound for epoch ${epoch} to update oracle`);
+      console.log(
+        `[operator-bot] Oracle check for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
+      );
+
+      if (oracleCalled || (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance)) {
+        console.log(`[operator-bot] ▶ Executing epoch ${epoch} (oracleCalled=${oracleCalled})`);
         txPending = true;
         lastAttemptedEpochs.set(epoch, now);
         try {
@@ -177,21 +170,25 @@ async function tryExecute(epoch) {
           txPending = false;
           return true;
         } catch (err) {
-          console.error(`[operator-bot] ❌ Forced executeRound failed for epoch ${epoch}: ${err.message}`);
+          console.error(`[operator-bot] ❌ Failed epoch ${epoch}: ${err.message}`);
           txPending = false;
           return false; // Retry on next loop
         }
       } else {
-        console.log(`[operator-bot] Oracle data invalid for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`);
+        console.log(
+          `[operator-bot] Oracle data invalid for epoch ${epoch}: roundId=${oracleRoundId}, contract oracleLatestRoundId=${oracleLatestRoundId}, timestamp=${ts(oracleTimestamp)}, allowance=${oracleUpdateAllowance}s`
+        );
+        return false;
       }
     } catch (err) {
       console.error(`[operator-bot] ❌ Oracle check failed for epoch ${epoch}: ${err.message}`);
+      return false;
     }
   }
 
   // Log missed epoch or oracle delay but don’t mark as handled
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
-    console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (waiting for oracle or next epoch)`);
+    console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (outside execution window)`);
     return false; // Keep retrying
   }
 
@@ -221,10 +218,12 @@ async function checkAndExecute() {
       console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
 
-    // Log oracleUpdateAllowance status (manual update required if not admin)
+    // Log oracleUpdateAllowance status
     console.log(`[operator-bot] OracleUpdateAllowance: ${Number(oracleUpdateAllowance)}s`);
-    if (Number(oracleUpdateAllowance) < 3600) {
-      console.warn(`[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}) is too small. Update to 3600s using admin wallet via setOracleUpdateAllowance(3600).`);
+    if (Number(oracleUpdateAllowance) < 100) {
+      console.warn(
+        `[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}s) is too small. Set to 3600s (or at least 100s) using admin wallet via Blockscout for reliability.`
+      );
     }
 
     const bootstrapped = await bootstrapGenesis();
@@ -271,13 +270,13 @@ setInterval(async () => {
     if (epoch >= 2) {
       const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
       console.log(
-        `[operator-bot] Previous Round (epoch ${epoch - 2}): closeTimestamp=${ts(Number(prevRound.closeTimestamp))}, oracleCalled=${prevRound.oracleCalled}`
+        `[operator-bot] Previous Round (epoch ${epoch - 2}): closeTimestamp=${ts(Number(prevRound.closeTimestamp))}, lockTimestamp=${ts(Number(prevRound.lockTimestamp))}, oracleCalled=${prevRound.oracleCalled}`
       );
     }
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 3000); // Check every 3s for faster detection
+}, 3000); // Check every 3s for fast detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
