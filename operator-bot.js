@@ -6,10 +6,10 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 5000,   // poll every 5s
+  CHECK_INTERVAL = 5000,     // run every 5s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,     // must match contract setting
-  SAFE_DELAY = 2,          // wait 2s after lock
+  BUFFER_SECONDS = 30,       // must match contract setting
+  SAFE_DELAY = 2,            // extra seconds after lock before executing
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -21,71 +21,98 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
 let txPending = false;
-let lastExecuted = 0;
+let nextNonce = null;
 
+// --- Utility: format unix timestamp to UTC ---
 function ts(unix) {
-  return new Date(unix * 1000).toISOString().replace('T',' ').replace('Z',' UTC');
+  return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
+// --- Send tx safely with fixed gas + manual nonce ---
 async function sendTx(fn) {
-  const tx = await fn({
-    gasLimit: Number(GAS_LIMIT),
-    gasPrice: ethers.parseUnits("1000", "gwei"), // 🔒 fixed gas price
-  });
-  console.log(`[operator-bot] Tx sent: ${tx.hash}`);
-  return await tx.wait();
+  if (nextNonce === null) {
+    nextNonce = await provider.getTransactionCount(wallet.address, "latest");
+  }
+
+  try {
+    const tx = await fn({
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits("1000", "gwei"),
+      nonce: nextNonce,
+    });
+
+    console.log(`[operator-bot] Tx sent (nonce ${nextNonce}): ${tx.hash}`);
+    nextNonce++; // bump for next send
+
+    const receipt = await tx.wait();
+    return receipt;
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Tx error: ${err.message}`);
+
+    // resync nonce if failure
+    nextNonce = await provider.getTransactionCount(wallet.address, "latest");
+    throw err;
+  }
 }
 
+// --- Genesis bootstrap (start + lock once) ---
 async function bootstrapGenesis() {
-  const started = await prediction.genesisStartOnce();
-  const locked = await prediction.genesisLockOnce();
+  const genesisStartOnce = await prediction.genesisStartOnce();
+  const genesisLockOnce = await prediction.genesisLockOnce();
 
-  if (!started) {
-    console.log(`[operator-bot] ⚡ genesisStartRound`);
-    const r = await sendTx((opts) => prediction.genesisStartRound(opts));
-    console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
+  if (!genesisStartOnce) {
+    console.log(`[operator-bot] ⚡ Calling genesisStartRound...`);
+    const receipt = await sendTx((opts) => prediction.genesisStartRound(opts));
+    console.log(`[operator-bot] ✅ genesisStartRound executed (${receipt.hash})`);
     return true;
   }
 
-  if (started && !locked) {
-    console.log(`[operator-bot] ⚡ genesisLockRound`);
-    const r = await sendTx((opts) => prediction.genesisLockRound(opts));
-    console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
+  if (genesisStartOnce && !genesisLockOnce) {
+    console.log(`[operator-bot] ⚡ Calling genesisLockRound...`);
+    const receipt = await sendTx((opts) => prediction.genesisLockRound(opts));
+    console.log(`[operator-bot] ✅ genesisLockRound executed (${receipt.hash})`);
     return true;
   }
 
   return false;
 }
 
+// --- Main execution loop ---
 async function checkAndExecute() {
-  if (txPending) return;
+  if (txPending) return; // never overlap
 
   try {
-    const boot = await bootstrapGenesis();
-    if (boot) return;
+    const bootstrapped = await bootstrapGenesis();
+    if (bootstrapped) return;
 
     const epoch = await prediction.currentEpoch();
     const round = await prediction.rounds(epoch);
     const now = Math.floor(Date.now() / 1000);
+
     const lockTime = Number(round.lockTimestamp);
+    const closeTime = Number(round.closeTimestamp);
 
-    if (epoch.toString() === lastExecuted.toString()) return;
-
-    if (lockTime > 0 && now >= lockTime + SAFE_DELAY && now <= lockTime + BUFFER_SECONDS) {
-      console.log(`[operator-bot] Executing epoch ${epoch}... now=${ts(now)} lock=${ts(lockTime)}`);
+    // Execute just after lock + SAFE_DELAY
+    if (
+      lockTime > 0 &&
+      now >= lockTime + Number(SAFE_DELAY) &&
+      now <= lockTime + Number(BUFFER_SECONDS)
+    ) {
+      console.log(
+        `[operator-bot] Executing round ${epoch.toString()}... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
+      );
       txPending = true;
-      try {
-        const r = await sendTx((opts) => prediction.executeRound(opts));
-        console.log(`[operator-bot] ✅ Executed round ${epoch} (${r.hash})`);
-        lastExecuted = epoch;
-      } finally {
-        txPending = false;
-      }
-    } else if (lockTime > 0 && now > lockTime + BUFFER_SECONDS) {
-      console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (lock=${ts(lockTime)}). Moving on...`);
-      lastExecuted = epoch;
+      const receipt = await sendTx((opts) => prediction.executeRound(opts));
+      console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
+      txPending = false;
+    } else if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
+      console.log(
+        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (lock=${ts(lockTime)}). Skipping...`
+      );
     } else {
-      console.log(`[operator-bot] Waiting... now=${ts(now)} lock=${ts(lockTime)}`);
+      console.log(
+        `[operator-bot] Waiting... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
+      );
     }
   } catch (err) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
@@ -94,4 +121,5 @@ async function checkAndExecute() {
 }
 
 console.log(`[operator-bot] Starting...`);
+checkAndExecute();
 setInterval(checkAndExecute, Number(CHECK_INTERVAL));
