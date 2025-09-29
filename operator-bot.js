@@ -31,7 +31,7 @@ async function sendTx(fn) {
   try {
     const tx = await fn({
       gasLimit: Number(GAS_LIMIT),
-      maxFeePerGas: ethers.parseUnits("1000", "gwei"),
+      maxFeePerGas: ethers.parseUnits("2000", "gwei"),
       maxPriorityFeePerGas: ethers.parseUnits("50", "gwei"),
     });
     console.log(`[operator-bot] Tx sent: ${tx.hash}`);
@@ -80,7 +80,6 @@ async function checkAndExecute() {
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
-    // --- Correct execution check: use closeTimestamp ---
     if (
       closeTime > 0 &&
       now >= closeTime &&
@@ -94,7 +93,6 @@ async function checkAndExecute() {
       console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
       txPending = false;
     } else if (closeTime > 0 && now > closeTime + Number(BUFFER_SECONDS)) {
-      // --- Skip missed rounds so we don’t get stuck ---
       console.log(
         `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (close=${ts(closeTime)}). Skipping...`
       );
