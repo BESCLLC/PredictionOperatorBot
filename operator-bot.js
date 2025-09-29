@@ -6,18 +6,28 @@ const {
   RPC_URL,
   OPERATOR_KEY,
   PREDICTION_ADDRESS,
+  ORACLE_ADDRESS, // Add oracle address to .env
   CHECK_INTERVAL = 1000, // 1s for tight polling
   GAS_LIMIT = 500000,
   BUFFER_SECONDS = 30,   // Must match contract
 } = process.env;
 
-if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY) {
-  throw new Error('Missing RPC_URL, PREDICTION_ADDRESS, or OPERATOR_KEY');
+if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY || !ORACLE_ADDRESS) {
+  throw new Error('Missing RPC_URL, PREDICTION_ADDRESS, OPERATOR_KEY, or ORACLE_ADDRESS');
 }
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(OPERATOR_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
+
+// Oracle contract instance
+const oracleAbi = [
+  'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
+  'function decimals() view returns (uint8)',
+  'function description() view returns (string)',
+  'function version() view returns (uint256)',
+];
+const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 
 let txPending = false;
 let lastHandledEpoch = 0;
@@ -177,9 +187,11 @@ setInterval(async () => {
     const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
     const oracleRoundId = await prediction.oracleLatestRoundId();
     const paused = await prediction.paused({ blockTag: 'latest' });
-    const latestRoundData = await prediction.oracle.latestRoundData();
+    const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
+    const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
+    const oracleData = await oracle.latestRoundData();
     console.log(
-      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, Oracle Data: { roundId: ${latestRoundData[0]}, price: ${latestRoundData[1]}, timestamp: ${ts(latestRoundData[3])} }`
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, Oracle Data: { roundId: ${oracleData[0]}, price: ${oracleData[1]}, timestamp: ${ts(oracleData[3])} }`
     );
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
