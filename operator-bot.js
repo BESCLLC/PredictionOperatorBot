@@ -5,57 +5,49 @@ import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: "json"
 const {
   RPC_URL,
   PREDICTION_ADDRESS,
-  PRIVATE_KEY,
-  CHECK_INTERVAL = 5000,     // run every 5s
+  OPERATOR_KEY,   // 🔑 new variable name
+  CHECK_INTERVAL = 5000, // run every 5s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,       // must match contract setting
-  SAFE_DELAY = 2,            // extra seconds after lock before executing
+  BUFFER_SECONDS = 30,   // must match contract setting
+  SAFE_DELAY = 2,        // seconds after lock before executing
 } = process.env;
 
-if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
-  throw new Error("Missing RPC_URL, PREDICTION_ADDRESS, or PRIVATE_KEY");
+if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY) {
+  throw new Error("Missing RPC_URL, PREDICTION_ADDRESS, or OPERATOR_KEY");
 }
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+const wallet = new ethers.Wallet(OPERATOR_KEY, provider);   // 👈 use OPERATOR_KEY here
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
 let txPending = false;
-let nextNonce = null;
 
-// --- Utility: format unix timestamp to UTC ---
+// --- format unix timestamp to UTC ---
 function ts(unix) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
-// --- Send tx safely with fixed gas + manual nonce ---
+// --- safe send with retry ---
 async function sendTx(fn) {
-  if (nextNonce === null) {
-    nextNonce = await provider.getTransactionCount(wallet.address, "latest");
-  }
-
-  try {
-    const tx = await fn({
-      gasLimit: Number(GAS_LIMIT),
-      gasPrice: ethers.parseUnits("1000", "gwei"),
-      nonce: nextNonce,
-    });
-
-    console.log(`[operator-bot] Tx sent (nonce ${nextNonce}): ${tx.hash}`);
-    nextNonce++; // bump for next send
-
-    const receipt = await tx.wait();
-    return receipt;
-  } catch (err) {
-    console.error(`[operator-bot] ❌ Tx error: ${err.message}`);
-
-    // resync nonce if failure
-    nextNonce = await provider.getTransactionCount(wallet.address, "latest");
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const tx = await fn({
+        gasLimit: Number(GAS_LIMIT),
+        maxFeePerGas: ethers.parseUnits("1000", "gwei"),       // fixed to exactly 1000 gwei
+        maxPriorityFeePerGas: ethers.parseUnits("1000", "gwei"),
+      });
+      console.log(`[operator-bot] Tx sent (nonce ${tx.nonce}): ${tx.hash}`);
+      const receipt = await tx.wait();
+      return receipt;
+    } catch (err) {
+      console.error(`[operator-bot] ❌ Error sending tx (try ${attempt}): ${err.message}`);
+      if (attempt === 3) throw err;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   }
 }
 
-// --- Genesis bootstrap (start + lock once) ---
+// --- bootstrap genesis ---
 async function bootstrapGenesis() {
   const genesisStartOnce = await prediction.genesisStartOnce();
   const genesisLockOnce = await prediction.genesisLockOnce();
@@ -77,9 +69,9 @@ async function bootstrapGenesis() {
   return false;
 }
 
-// --- Main execution loop ---
+// --- main loop ---
 async function checkAndExecute() {
-  if (txPending) return; // never overlap
+  if (txPending) return;
 
   try {
     const bootstrapped = await bootstrapGenesis();
@@ -92,7 +84,6 @@ async function checkAndExecute() {
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
-    // Execute just after lock + SAFE_DELAY
     if (
       lockTime > 0 &&
       now >= lockTime + Number(SAFE_DELAY) &&
