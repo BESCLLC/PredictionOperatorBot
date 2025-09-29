@@ -6,7 +6,7 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 5000,   // poll every 5s
+  CHECK_INTERVAL = 3000,   // poll every 5s
   GAS_LIMIT = 500000,
   BUFFER_SECONDS = 30,     // contract buffer
   SAFE_DELAY = 2,          // wait 2s after lock
