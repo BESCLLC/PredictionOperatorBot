@@ -6,10 +6,10 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 5000, // run every 5s (instead of 30s)
+  CHECK_INTERVAL = 5000, // run every 5s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30, // must match contract setting
-  SAFE_DELAY = 2, // extra seconds after lock before executing
+  BUFFER_SECONDS = 30,   // must match contract setting
+  SAFE_DELAY = 2,        // wait a bit after close before executing
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -81,29 +81,28 @@ async function checkAndExecute() {
     const round = await prediction.rounds(epoch);
     const now = Math.floor(Date.now() / 1000);
 
-    const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
-    // ✅ Execute right after lock + SAFE_DELAY
+    // ✅ Execute just after close, inside buffer
     if (
-      lockTime > 0 &&
-      now >= lockTime + Number(SAFE_DELAY) &&
-      now <= lockTime + Number(BUFFER_SECONDS)
+      closeTime > 0 &&
+      now >= closeTime + Number(SAFE_DELAY) &&
+      now <= closeTime + Number(BUFFER_SECONDS)
     ) {
       console.log(
-        `[operator-bot] Executing round ${epoch.toString()}... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
+        `[operator-bot] Executing round ${epoch.toString()}... now=${ts(now)} close=${ts(closeTime)}`
       );
       txPending = true;
       const receipt = await sendTx((opts) => prediction.executeRound(opts));
       console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
       txPending = false;
-    } else if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
+    } else if (closeTime > 0 && now > closeTime + Number(BUFFER_SECONDS)) {
       console.log(
-        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (lock=${ts(lockTime)}). Skipping...`
+        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (close=${ts(closeTime)}). Skipping...`
       );
     } else {
       console.log(
-        `[operator-bot] Waiting... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
+        `[operator-bot] Waiting... now=${ts(now)} close=${ts(closeTime)}`
       );
     }
   } catch (err) {
