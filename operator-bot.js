@@ -4,12 +4,12 @@ import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: "json"
 
 const {
   RPC_URL,
-  OPERATOR_KEY, // use a different key than oracle
+  OPERATOR_KEY, // use different key than oracle
   PREDICTION_ADDRESS,
-  CHECK_INTERVAL = 5000, // check every 5s
+  CHECK_INTERVAL = 5000,   // check every 5s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,
-  SAFE_DELAY = 2,
+  BUFFER_SECONDS = 30,     // must match contract
+  SAFE_DELAY = 2,          // wait a bit after lock
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY) {
@@ -21,56 +21,46 @@ const wallet = new ethers.Wallet(OPERATOR_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
 let txPending = false;
-let lastExecutedEpoch = 0;
+let lastHandledEpoch = 0;
 
-// --- Format timestamp nicely ---
-function ts(unix) {
+// --- Helpers ---
+function ts(unix: number) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
-// --- Safe transaction sender ---
-async function sendTx(fn) {
+async function sendTx(fn: any) {
   const tx = await fn({
     gasLimit: Number(GAS_LIMIT),
-    gasPrice: ethers.parseUnits("1000", "gwei"), // fixed 1000 gwei
+    gasPrice: ethers.parseUnits("1000", "gwei"),
   });
-  console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+  console.log(`[operator-bot] 🚀 Tx sent: ${tx.hash}`);
   const receipt = await tx.wait();
   return receipt;
 }
 
-// --- Bootstrap genesis only once ---
-let genesisComplete = false;
+// --- Bootstrap Genesis ---
 async function bootstrapGenesis() {
-  if (genesisComplete) return false;
-
   const startOnce = await prediction.genesisStartOnce();
   const lockOnce = await prediction.genesisLockOnce();
 
   if (!startOnce) {
     console.log(`[operator-bot] ⚡ genesisStartRound`);
-    const receipt = await sendTx((opts) => prediction.genesisStartRound(opts));
-    console.log(`[operator-bot] ✅ genesisStartRound (${receipt.hash})`);
+    const r = await sendTx((opts: any) => prediction.genesisStartRound(opts));
+    console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
     return true;
   }
-
   if (startOnce && !lockOnce) {
     console.log(`[operator-bot] ⚡ genesisLockRound`);
-    const receipt = await sendTx((opts) => prediction.genesisLockRound(opts));
-    console.log(`[operator-bot] ✅ genesisLockRound (${receipt.hash})`);
+    const r = await sendTx((opts: any) => prediction.genesisLockRound(opts));
+    console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
     return true;
   }
-
-  if (startOnce && lockOnce) {
-    genesisComplete = true; // never touch genesis again
-  }
-
   return false;
 }
 
-// --- Try to execute given epoch ---
-async function tryExecute(epoch) {
-  if (epoch <= lastExecutedEpoch) return;
+// --- Try execute an epoch ---
+async function tryExecute(epoch: number) {
+  if (epoch <= lastHandledEpoch) return false; // already processed
 
   const round = await prediction.rounds(epoch);
   const now = Math.floor(Date.now() / 1000);
@@ -79,50 +69,50 @@ async function tryExecute(epoch) {
   const closeTime = Number(round.closeTimestamp);
   const oracleCalled = round.oracleCalled;
 
+  // Valid execution window
   if (
     lockTime > 0 &&
     oracleCalled &&
     now >= lockTime + Number(SAFE_DELAY) &&
     now <= lockTime + Number(BUFFER_SECONDS)
   ) {
-    console.log(`[operator-bot] Executing epoch ${epoch} now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`);
+    console.log(`[operator-bot] ✅ Executing epoch ${epoch} now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`);
     txPending = true;
     try {
-      const receipt = await sendTx((opts) => prediction.executeRound(opts));
-      console.log(`[operator-bot] ✅ Executed epoch ${epoch} (${receipt.hash})`);
-      lastExecutedEpoch = epoch;
-    } catch (err) {
-      console.error(`[operator-bot] ❌ Tx failed for epoch ${epoch}: ${err.message}`);
+      const r = await sendTx((opts: any) => prediction.executeRound(opts));
+      console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
+    } catch (e: any) {
+      console.error(`[operator-bot] ❌ Execute failed epoch ${epoch}: ${e.message}`);
     }
     txPending = false;
+    lastHandledEpoch = epoch;
     return true;
   }
 
+  // Expired
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (lock=${ts(lockTime)} close=${ts(closeTime)})`);
-    lastExecutedEpoch = epoch;
+    lastHandledEpoch = epoch; // mark skipped so we move forward
   }
-
   return false;
 }
 
 // --- Main loop ---
 async function checkAndExecute() {
   if (txPending) return;
-
   try {
     const bootstrapped = await bootstrapGenesis();
     if (bootstrapped) return;
 
     const currentEpoch = Number(await prediction.currentEpoch());
 
-    // ✅ Always check last 3 epochs so bot never drifts
-    for (let e = currentEpoch - 2; e <= currentEpoch; e++) {
+    // Check last 2 epochs, current, and one ahead
+    for (let e = currentEpoch - 2; e <= currentEpoch + 1; e++) {
       if (e > 0) {
         await tryExecute(e);
       }
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
     txPending = false;
   }
