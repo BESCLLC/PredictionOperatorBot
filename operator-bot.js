@@ -18,8 +18,40 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
+async function bootstrapGenesis() {
+  const genesisStartOnce = await prediction.genesisStartOnce();
+  const genesisLockOnce = await prediction.genesisLockOnce();
+
+  if (!genesisStartOnce) {
+    console.log(`[operator-bot] ⚡ Calling genesisStartRound...`);
+    const tx = await prediction.genesisStartRound({
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits("1000", "gwei"),
+    });
+    console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+    await tx.wait();
+    console.log(`[operator-bot] ✅ genesisStartRound executed`);
+    return;
+  }
+
+  if (genesisStartOnce && !genesisLockOnce) {
+    console.log(`[operator-bot] ⚡ Calling genesisLockRound...`);
+    const tx = await prediction.genesisLockRound({
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits("1000", "gwei"),
+    });
+    console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+    await tx.wait();
+    console.log(`[operator-bot] ✅ genesisLockRound executed`);
+    return;
+  }
+}
+
 async function checkAndExecute() {
   try {
+    // handle genesis bootstrap if needed
+    await bootstrapGenesis();
+
     const epoch = await prediction.currentEpoch();
     const round = await prediction.rounds(epoch);
     const now = Math.floor(Date.now() / 1000);
@@ -29,11 +61,10 @@ async function checkAndExecute() {
 
     if (lockTime > 0 && now > closeTime) {
       console.log(`[operator-bot] Executing round ${epoch.toString()}...`);
-      
-      // Force fixed gas settings
+
       const tx = await prediction.executeRound({
         gasLimit: Number(GAS_LIMIT),
-        gasPrice: ethers.parseUnits("1000", "gwei")
+        gasPrice: ethers.parseUnits("1000", "gwei"),
       });
 
       console.log(`[operator-bot] Tx sent: ${tx.hash}`);
