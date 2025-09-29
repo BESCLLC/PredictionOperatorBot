@@ -160,7 +160,7 @@ async function tryExecute(epoch) {
   if (lockTime > 0 && !oracleCalled && now >= lockTime && canEndPrevious) {
     try {
       const oracleData = await oracle.latestRoundData();
-      const oracleRoundId = oracleData[0].toString();
+      const oracleRoundId = Number(oracleData[0]);
       const oracleTimestamp = Number(oracleData[3]);
       const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
       const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
@@ -221,20 +221,10 @@ async function checkAndExecute() {
       console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
 
-    // Update oracleUpdateAllowance if too small
+    // Log oracleUpdateAllowance status (manual update required if not admin)
+    console.log(`[operator-bot] OracleUpdateAllowance: ${Number(oracleUpdateAllowance)}s`);
     if (Number(oracleUpdateAllowance) < 3600) {
-      console.warn(`[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}) is too small, attempting to update to 3600s`);
-      try {
-        const tx = await prediction.setOracleUpdateAllowance(3600, {
-          gasLimit: 200000,
-          gasPrice: ethers.parseUnits('1000', 'gwei'),
-        });
-        console.log(`[operator-bot] Set oracleUpdateAllowance tx: ${tx.hash}`);
-        await tx.wait(2);
-        console.log(`[operator-bot] ✅ oracleUpdateAllowance updated to 3600s`);
-      } catch (err) {
-        console.error(`[operator-bot] ❌ Failed to update oracleUpdateAllowance: ${err.message}`);
-      }
+      console.warn(`[operator-bot] ⚠️ oracleUpdateAllowance (${oracleUpdateAllowance}) is too small. Update to 3600s using admin wallet via setOracleUpdateAllowance(3600).`);
     }
 
     const bootstrapped = await bootstrapGenesis();
@@ -266,7 +256,7 @@ async function checkAndExecute() {
 // --- Monitoring ---
 setInterval(async () => {
   try {
-    const epoch = await prediction.currentEpoch({ blockTag: 'latest' });
+    const epoch = Number(await prediction.currentEpoch({ blockTag: 'latest' }));
     const oracleRoundId = Number(await prediction.oracleLatestRoundId());
     const paused = await prediction.paused({ blockTag: 'latest' });
     const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
@@ -275,13 +265,13 @@ setInterval(async () => {
     const oracleData = await oracle.latestRoundData();
     const round = await prediction.rounds(epoch, { blockTag: 'latest' });
     console.log(
-      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${oracleData[0].toString()}, price: ${oracleData[1].toString()}, timestamp: ${ts(oracleData[3].toString())} }, Current Round: { lockTimestamp: ${ts(round.lockTimestamp)}, oracleCalled: ${round.oracleCalled}, startTimestamp: ${ts(round.startTimestamp)}, closeTimestamp: ${ts(round.closeTimestamp)} }`
+      `[operator-bot] Monitor - Epoch: ${epoch}, Oracle Round ID: ${oracleRoundId}, Paused: ${paused}, GenesisStartOnce: ${startOnce}, GenesisLockOnce: ${lockOnce}, OracleUpdateAllowance: ${oracleUpdateAllowance}, Oracle Data: { roundId: ${Number(oracleData[0])}, price: ${Number(oracleData[1])}, timestamp: ${ts(Number(oracleData[3]))} }, Current Round: { lockTimestamp: ${ts(Number(round.lockTimestamp))}, oracleCalled: ${round.oracleCalled}, startTimestamp: ${ts(Number(round.startTimestamp))}, closeTimestamp: ${ts(Number(round.closeTimestamp))} }`
     );
     // Log previous round to diagnose _safeEndRound
     if (epoch >= 2) {
       const prevRound = await prediction.rounds(epoch - 2, { blockTag: 'latest' });
       console.log(
-        `[operator-bot] Previous Round (epoch ${epoch - 2}): closeTimestamp=${ts(prevRound.closeTimestamp)}, oracleCalled=${prevRound.oracleCalled}`
+        `[operator-bot] Previous Round (epoch ${epoch - 2}): closeTimestamp=${ts(Number(prevRound.closeTimestamp))}, oracleCalled=${prevRound.oracleCalled}`
       );
     }
   } catch (err) {
