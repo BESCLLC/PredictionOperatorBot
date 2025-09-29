@@ -10,7 +10,7 @@ const {
   GAS_LIMIT = 500000,
   BUFFER_SECONDS = 30,     // must match contract
   SAFE_DELAY = 2,          // seconds after close before exec
-  MAX_CATCHUP = 5,         // how many missed rounds to try in one go
+  MAX_CATCHUP = 5,         // how many missed rounds to try
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -74,13 +74,13 @@ async function checkAndExecute() {
     const bootstrapped = await bootstrapGenesis();
     if (bootstrapped) return;
 
-    const currentEpoch = await prediction.currentEpoch();
+    const currentEpoch = await prediction.currentEpoch(); // BigInt
     const now = Math.floor(Date.now() / 1000);
 
-    // loop backwards up to MAX_CATCHUP rounds
+    // Loop backwards up to MAX_CATCHUP rounds
     for (let i = 1; i <= MAX_CATCHUP; i++) {
-      const targetEpoch = currentEpoch.sub(i);
-      if (targetEpoch.lte(0)) break;
+      const targetEpoch = currentEpoch - BigInt(i);
+      if (targetEpoch <= 0n) break;
 
       const round = await prediction.rounds(targetEpoch);
       const closeTime = Number(round.closeTimestamp);
@@ -97,7 +97,7 @@ async function checkAndExecute() {
         const receipt = await sendTx((opts) => prediction.executeRound(opts));
         console.log(`[operator-bot] ✅ Round ${targetEpoch.toString()} executed (${receipt.hash})`);
         txPending = false;
-        return; // exit after executing one, next tick will handle the next
+        return; // stop after one success
       }
     }
 
