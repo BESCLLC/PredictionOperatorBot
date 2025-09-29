@@ -4,7 +4,7 @@ import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: "json"
 
 const {
   RPC_URL,
-  OPERATOR_KEY, // renamed so you can use a different key from oracle
+  OPERATOR_KEY, // separate from oracle key
   PREDICTION_ADDRESS,
   CHECK_INTERVAL = 5000,
   GAS_LIMIT = 500000,
@@ -31,15 +31,14 @@ function ts(unix) {
 async function sendTx(fn) {
   const tx = await fn({
     gasLimit: Number(GAS_LIMIT),
-    maxFeePerGas: ethers.parseUnits("1000", "gwei"),       // hard-coded per your requirement
-    maxPriorityFeePerGas: ethers.parseUnits("1000", "gwei"),
+    gasPrice: ethers.parseUnits("1000", "gwei"), // hard fixed
   });
   console.log(`[operator-bot] Tx sent: ${tx.hash}`);
   const receipt = await tx.wait();
   return receipt;
 }
 
-// --- Bootstrap genesis only once ---
+// --- Bootstrap genesis ---
 async function bootstrapGenesis() {
   const startOnce = await prediction.genesisStartOnce();
   const lockOnce = await prediction.genesisLockOnce();
@@ -61,9 +60,9 @@ async function bootstrapGenesis() {
   return false;
 }
 
-// --- Try to execute given epoch ---
+// --- Execute a finished epoch ---
 async function tryExecute(epoch) {
-  if (epoch <= lastExecutedEpoch) return; // already did it
+  if (epoch <= lastExecutedEpoch) return false;
 
   const round = await prediction.rounds(epoch);
   const now = Math.floor(Date.now() / 1000);
@@ -72,27 +71,28 @@ async function tryExecute(epoch) {
   const closeTime = Number(round.closeTimestamp);
   const oracleCalled = round.oracleCalled;
 
-  // must wait until oracle updated and lock passed
+  // safe condition: oracle updated + lock passed
   if (
     lockTime > 0 &&
     oracleCalled &&
     now >= lockTime + Number(SAFE_DELAY) &&
-    now <= lockTime + Number(BUFFER_SECONDS)
+    now <= closeTime + Number(BUFFER_SECONDS)
   ) {
-    console.log(
-      `[operator-bot] Executing epoch ${epoch} now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
-    );
+    console.log(`[operator-bot] Executing epoch ${epoch} now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`);
     txPending = true;
-    const receipt = await sendTx((opts) => prediction.executeRound(opts));
-    console.log(`[operator-bot] ✅ Executed epoch ${epoch} (${receipt.hash})`);
-    txPending = false;
-    lastExecutedEpoch = epoch;
-    return true;
+    try {
+      const receipt = await sendTx((opts) => prediction.executeRound(opts));
+      console.log(`[operator-bot] ✅ Executed epoch ${epoch} (${receipt.hash})`);
+      lastExecutedEpoch = epoch;
+      return true;
+    } finally {
+      txPending = false;
+    }
   }
 
-  if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
+  if (lockTime > 0 && now > closeTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (lock=${ts(lockTime)} close=${ts(closeTime)})`);
-    lastExecutedEpoch = epoch; // mark skipped so we move forward
+    lastExecutedEpoch = epoch;
   }
 
   return false;
@@ -108,11 +108,9 @@ async function checkAndExecute() {
 
     const currentEpoch = Number(await prediction.currentEpoch());
 
-    // always check current and 2 previous epochs
-    for (let e = currentEpoch - 2; e <= currentEpoch; e++) {
-      if (e > 0) {
-        await tryExecute(e);
-      }
+    // ✅ Only execute previous epoch, not current
+    if (currentEpoch > 1) {
+      await tryExecute(currentEpoch - 1);
     }
   } catch (err) {
     console.error(`[operator-bot] ❌ Error: ${err.message}`);
