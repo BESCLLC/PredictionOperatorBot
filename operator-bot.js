@@ -18,6 +18,9 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
+// Hard floor = 1000 gwei
+const MIN_GAS_PRICE = ethers.parseUnits("1000", "gwei");
+
 // ---------- GENESIS BOOTSTRAP ----------
 async function bootstrapGenesis() {
   const genesisStartOnce = await prediction.genesisStartOnce();
@@ -42,46 +45,30 @@ async function bootstrapGenesis() {
 
 // ---------- SAFE TX SENDER ----------
 async function sendTx(fn) {
-  let attempt = 0;
-  let lastError;
+  try {
+    let feeData = await provider.getFeeData();
 
-  while (attempt < 5) {
-    try {
-      // dynamic fee data
-      const feeData = await provider.getFeeData();
+    // Default to RPC gasPrice if missing
+    let gasPrice = feeData.gasPrice || MIN_GAS_PRICE;
 
-      const overrides = {
-        gasLimit: Number(GAS_LIMIT),
-      };
-
-      if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) {
-        overrides.maxFeePerGas = feeData.maxFeePerGas;
-        overrides.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas;
-      } else {
-        // fallback to legacy gasPrice if RPC doesn’t support EIP-1559
-        overrides.gasPrice = await provider.getGasPrice();
-      }
-
-      const tx = await fn()(overrides);
-      console.log(`[operator-bot] Tx sent: ${tx.hash}`);
-      await tx.wait();
-      return tx;
-    } catch (err) {
-      lastError = err;
-      if (err.code === 'REPLACEMENT_UNDERPRICED' || err.message.includes('replacement fee too low')) {
-        console.log(`[operator-bot] ⬆️ Replacement underpriced, bumping gas...`);
-        // bump gas by 10% and retry
-        const gasPrice = await provider.getGasPrice();
-        fn().overrides = { gasPrice: gasPrice * 11n / 10n, gasLimit: Number(GAS_LIMIT) };
-      } else {
-        console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
-        break;
-      }
+    // Enforce 1000 gwei minimum
+    if (gasPrice < MIN_GAS_PRICE) {
+      gasPrice = MIN_GAS_PRICE;
     }
-    attempt++;
-    await new Promise((res) => setTimeout(res, 5000));
+
+    const overrides = {
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice,
+    };
+
+    const tx = await fn()(overrides);
+    console.log(`[operator-bot] Tx sent: ${tx.hash}`);
+    await tx.wait();
+    return tx;
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
+    throw err;
   }
-  throw lastError;
 }
 
 // ---------- MAIN LOOP ----------
