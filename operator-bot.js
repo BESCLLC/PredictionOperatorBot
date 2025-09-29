@@ -6,9 +6,9 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 3000,   // poll every 5s
+  CHECK_INTERVAL = 5000,   // poll every 5s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,     // contract buffer
+  BUFFER_SECONDS = 30,     // must match contract setting
   SAFE_DELAY = 2,          // wait 2s after lock
 } = process.env;
 
@@ -30,6 +30,7 @@ function ts(unix) {
 async function sendTx(fn) {
   const tx = await fn({
     gasLimit: Number(GAS_LIMIT),
+    gasPrice: ethers.parseUnits("1000", "gwei"), // 🔒 fixed gas price
   });
   console.log(`[operator-bot] Tx sent: ${tx.hash}`);
   return await tx.wait();
@@ -68,7 +69,6 @@ async function checkAndExecute() {
     const now = Math.floor(Date.now() / 1000);
     const lockTime = Number(round.lockTimestamp);
 
-    // only run once per epoch
     if (epoch.toString() === lastExecuted.toString()) return;
 
     if (lockTime > 0 && now >= lockTime + SAFE_DELAY && now <= lockTime + BUFFER_SECONDS) {
