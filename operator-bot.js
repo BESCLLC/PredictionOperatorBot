@@ -6,9 +6,9 @@ const {
   RPC_URL,
   PREDICTION_ADDRESS,
   PRIVATE_KEY,
-  CHECK_INTERVAL = 15000,   // check more often for tighter sync
+  CHECK_INTERVAL = 30000,
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,      // must match contract setting
+  BUFFER_SECONDS = 30, // must match contract setting
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
@@ -20,27 +20,30 @@ const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
 let txPending = false;
-let lastExecutedEpoch = 0;
 
+// --- Utility: format unix timestamp to UTC ---
 function ts(unix) {
   return new Date(unix * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
 }
 
+// --- Utility: send tx safely ---
 async function sendTx(fn) {
   try {
     const tx = await fn({
       gasLimit: Number(GAS_LIMIT),
-      gasPrice: ethers.parseUnits("1000", "gwei"), // fixed gas
+      maxFeePerGas: ethers.parseUnits("1000", "gwei"),
+      maxPriorityFeePerGas: ethers.parseUnits("50", "gwei"),
     });
     console.log(`[operator-bot] Tx sent: ${tx.hash}`);
     const receipt = await tx.wait();
     return receipt;
   } catch (err) {
     console.error(`[operator-bot] ❌ Error sending tx: ${err.message}`);
-    return null; // don’t crash
+    throw err;
   }
 }
 
+// --- Genesis bootstrap (start + lock once) ---
 async function bootstrapGenesis() {
   const genesisStartOnce = await prediction.genesisStartOnce();
   const genesisLockOnce = await prediction.genesisLockOnce();
@@ -48,20 +51,21 @@ async function bootstrapGenesis() {
   if (!genesisStartOnce) {
     console.log(`[operator-bot] ⚡ Calling genesisStartRound...`);
     const receipt = await sendTx((opts) => prediction.genesisStartRound(opts));
-    if (receipt) console.log(`[operator-bot] ✅ genesisStartRound executed (${receipt.hash})`);
+    console.log(`[operator-bot] ✅ genesisStartRound executed (${receipt.hash})`);
     return true;
   }
 
   if (genesisStartOnce && !genesisLockOnce) {
     console.log(`[operator-bot] ⚡ Calling genesisLockRound...`);
     const receipt = await sendTx((opts) => prediction.genesisLockRound(opts));
-    if (receipt) console.log(`[operator-bot] ✅ genesisLockRound executed (${receipt.hash})`);
+    console.log(`[operator-bot] ✅ genesisLockRound executed (${receipt.hash})`);
     return true;
   }
 
   return false;
 }
 
+// --- Main execution loop ---
 async function checkAndExecute() {
   if (txPending) return;
 
@@ -71,37 +75,14 @@ async function checkAndExecute() {
 
     const epoch = await prediction.currentEpoch();
     const round = await prediction.rounds(epoch);
-    const block = await provider.getBlock("latest");
-    const now = Number(block.timestamp);
+    const now = Math.floor(Date.now() / 1000);
 
     const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
 
-    // If we’re behind, try to catch up
-    if (lastExecutedEpoch > 0 && epoch > lastExecutedEpoch + 1) {
-      console.log(`[operator-bot] ⚠️ Behind by ${epoch - lastExecutedEpoch} epochs, catching up...`);
-      for (let e = lastExecutedEpoch + 1; e <= epoch; e++) {
-        try {
-          console.log(`[operator-bot] Catch-up: executing round ${e}`);
-          txPending = true;
-          const receipt = await sendTx((opts) => prediction.executeRound(opts));
-          if (receipt) {
-            console.log(`[operator-bot] ✅ Catch-up executed round ${e} (${receipt.hash})`);
-            lastExecutedEpoch = e;
-          }
-          txPending = false;
-        } catch (err) {
-          console.error(`[operator-bot] ❌ Catch-up failed: ${err.message}`);
-          txPending = false;
-          break; // stop trying this loop, retry next tick
-        }
-      }
-      return;
-    }
-
-    // Normal execution if we’re in window
+    // --- Correct execution check: use closeTimestamp ---
     if (
-      lockTime > 0 &&
+      closeTime > 0 &&
       now >= closeTime &&
       now <= closeTime + Number(BUFFER_SECONDS)
     ) {
@@ -110,11 +91,13 @@ async function checkAndExecute() {
       );
       txPending = true;
       const receipt = await sendTx((opts) => prediction.executeRound(opts));
-      if (receipt) {
-        console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
-        lastExecutedEpoch = Number(epoch);
-      }
+      console.log(`[operator-bot] ✅ Round executed (${receipt.hash})`);
       txPending = false;
+    } else if (closeTime > 0 && now > closeTime + Number(BUFFER_SECONDS)) {
+      // --- Skip missed rounds so we don’t get stuck ---
+      console.log(
+        `[operator-bot] ⏩ Missed execution window for round ${epoch.toString()} (close=${ts(closeTime)}). Skipping...`
+      );
     } else {
       console.log(
         `[operator-bot] Waiting... now=${ts(now)} lock=${ts(lockTime)} close=${ts(closeTime)}`
