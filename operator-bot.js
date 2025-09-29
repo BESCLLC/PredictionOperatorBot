@@ -67,13 +67,25 @@ async function bootstrapGenesis() {
     await sleep(1000);
     return true;
   }
+
   if (startOnce && !lockOnce) {
+    const currentEpoch = Number(await prediction.currentEpoch({ blockTag: 'latest' }));
+    const round = await prediction.rounds(currentEpoch, { blockTag: 'latest' });
+    const now = Math.floor(Date.now() / 1000);
+    const lockTime = Number(round.lockTimestamp);
+
+    if (now < lockTime) {
+      console.log(`[operator-bot] ⏳ Waiting for genesis lock window: Now=${ts(now)}, Lock=${ts(lockTime)}`);
+      return false; // Wait until lockTimestamp
+    }
+
     console.log('[operator-bot] ⚡ genesisLockRound');
     const r = await sendTx((opts) => prediction.genesisLockRound(opts));
     console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
     await sleep(1000);
     return true;
   }
+
   return false;
 }
 
@@ -110,7 +122,7 @@ async function tryExecute(epoch) {
   // Log missed epoch or oracle delay but don’t mark as handled
   if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
     console.log(`[operator-bot] ⏩ Missed epoch ${epoch} (waiting for oracle or next epoch)`);
-    return false; // Keep retrying until oracleCalled or new epoch
+    return false; // Keep retrying
   }
 
   if (lockTime > 0 && !oracleCalled) {
@@ -128,6 +140,7 @@ async function checkAndExecute() {
   try {
     // Validate configuration
     const contractBuffer = await prediction.bufferSeconds();
+    const intervalSeconds = await prediction.intervalSeconds();
     if (Number(contractBuffer) !== Number(BUFFER_SECONDS)) {
       console.error(`[operator-bot] BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
@@ -171,7 +184,7 @@ setInterval(async () => {
   } catch (err) {
     console.error(`[operator-bot] ❌ Monitor error: ${err.message}`);
   }
-}, 10000); // Check every 10s for faster detection
+}, 10000); // Check every 10s for fast detection
 
 // Monitor RPC health
 provider.on('error', (err) => console.error(`[operator-bot] ❌ RPC error: ${err.message}`));
