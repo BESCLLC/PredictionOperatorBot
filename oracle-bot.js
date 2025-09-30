@@ -2,24 +2,34 @@ import 'dotenv/config';
 import axios from 'axios';
 import { ethers } from 'ethers';
 import OracleAbi from './abi/SimpleOracleForPredictionV3.json' assert { type: 'json' };
+import PredictionAbi from './abi/PancakePredictionV3.json' assert { type: 'json' };
 
 const {
   RPC_URL,
   ORACLE_ADDRESS,
+  PREDICTION_ADDRESS,
   PRIVATE_KEY,
   ASSET = 'bitcoin',
-  INTERVAL = 10000, // 10s to align with round timing
+  INTERVAL = 10000, // 10s (should align with round timing)
+  GAS_LIMIT = 300000,
+  GAS_PRICE_GWEI = 1000,
 } = process.env;
 
-if (!RPC_URL || !ORACLE_ADDRESS || !PRIVATE_KEY) {
-  throw new Error('Missing RPC_URL, ORACLE_ADDRESS, or PRIVATE_KEY');
+if (!RPC_URL || !ORACLE_ADDRESS || !PREDICTION_ADDRESS || !PRIVATE_KEY) {
+  throw new Error('Missing RPC_URL, ORACLE_ADDRESS, PREDICTION_ADDRESS, or PRIVATE_KEY');
 }
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-const oracle = new ethers.Contract(ORACLE_ADDRESS, OracleAbi, wallet);
 
-// Fetch price from Binance.US with retry logic
+const oracle = new ethers.Contract(ORACLE_ADDRESS, OracleAbi, wallet);
+const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// -------------------- PRICE FETCHER --------------------
 async function fetchPrice() {
   const maxRetries = 5;
   let attempt = 1;
@@ -29,73 +39,63 @@ async function fetchPrice() {
       const r = await axios.get('https://api.binance.us/api/v3/ticker/price?symbol=BTCUSD');
       const price = Number(r.data.price);
       if (!price) throw new Error('Price not found');
-      return BigInt(Math.round(price * 1e8)); // Scale to 1e8
+      return BigInt(Math.round(price * 1e8)); // scale to 1e8
     } catch (err) {
       if (err.response?.status === 429 && attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s, 8s, 16s
-        console.warn(`[oracle-bot] Rate limit (429), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        const delay = Math.pow(2, attempt) * 1000;
+        console.warn(`[oracle-bot] ⚠️ Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await sleep(delay);
         attempt++;
       } else {
-        console.error(`[oracle-bot] ❌ Fetch price error: ${err.message}`);
+        console.error(`[oracle-bot] ❌ Price fetch failed: ${err.message}`);
         throw err;
       }
     }
   }
-  throw new Error('Max retries reached for Binance.US API');
+  throw new Error('Max retries reached for price fetch');
 }
 
+// -------------------- ORACLE UPDATE --------------------
 async function updateOracle() {
   try {
     const price = await fetchPrice();
     console.log(`[oracle-bot] Price: $${Number(price) / 1e8}`);
 
-    // Check pending and confirmed nonces
     const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending');
     const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest');
-    console.log(`[oracle-bot] Pending nonce: ${pendingNonce}, Confirmed nonce: ${confirmedNonce}`);
-
-    // Use pending nonce unless gap is too large
     let nonce = pendingNonce;
+
+    // Prevent runaway nonce gap
     if (pendingNonce > confirmedNonce + 10) {
-      console.warn(`[oracle-bot] ⚠️ Large nonce gap detected, resetting to confirmed nonce: ${confirmedNonce}`);
+      console.warn(`[oracle-bot] ⚠️ Large nonce gap, resetting to confirmed=${confirmedNonce}`);
       nonce = confirmedNonce;
     }
 
-    // Attempt to replace stuck transactions with higher gas price
-    if (pendingNonce > confirmedNonce) {
-      console.log(`[oracle-bot] Attempting to replace stuck transactions with higher gas price`);
-      for (let i = confirmedNonce; i < pendingNonce; i++) {
-        try {
-          const tx = await oracle.updatePrice(price, {
-            gasLimit: 200000,
-            gasPrice: ethers.parseUnits('1500', 'gwei'), // Higher gas price to replace
-            nonce: i,
-          });
-          console.log(`[oracle-bot] Replacement Tx sent: ${tx.hash}, nonce: ${i}`);
-          await tx.wait(2);
-        } catch (err) {
-          console.error(`[oracle-bot] ❌ Replacement Tx failed for nonce ${i}: ${err.message}`);
-        }
-      }
-      // Recheck nonce after replacement
-      nonce = await provider.getTransactionCount(wallet.address, 'pending');
-    }
-
-    const tx = await oracle.updatePrice(price, {
-      gasLimit: 200000, // Reduced gas limit for efficiency
-      gasPrice: ethers.parseUnits('1000', 'gwei'),
-      nonce, // Dynamic nonce
+    // 1. Update Oracle contract
+    const tx1 = await oracle.updatePrice(price, {
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits(String(GAS_PRICE_GWEI), 'gwei'),
+      nonce,
     });
+    console.log(`[oracle-bot] Oracle update tx sent: ${tx1.hash}, nonce=${nonce}`);
+    await tx1.wait(2);
 
-    console.log(`[oracle-bot] Tx sent: ${tx.hash}, nonce: ${nonce}`);
-    await tx.wait(2); // Wait for 2 confirmations
-    console.log(`[oracle-bot] ✅ Price updated`);
-  } catch (e) {
-    console.error(`[oracle-bot] ❌ Error: ${e.message}`);
+    // 2. Notify Prediction contract
+    const tx2 = await prediction.oracleUpdate({
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits(String(GAS_PRICE_GWEI), 'gwei'),
+      nonce: nonce + 1,
+    });
+    console.log(`[oracle-bot] Prediction oracleUpdate tx sent: ${tx2.hash}, nonce=${nonce + 1}`);
+    await tx2.wait(2);
+
+    console.log(`[oracle-bot] ✅ Oracle + Prediction updated successfully`);
+  } catch (err) {
+    console.error(`[oracle-bot] ❌ Error: ${err.message}`);
   }
 }
 
-console.log(`[oracle-bot] Starting for ${ASSET}...`);
+// -------------------- MAIN LOOP --------------------
+console.log(`[oracle-bot] Starting for ${ASSET}... Using wallet ${wallet.address}`);
 updateOracle();
 setInterval(updateOracle, Number(INTERVAL));
