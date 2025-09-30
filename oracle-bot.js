@@ -51,7 +51,7 @@ async function updateOracle() {
     console.log(`[oracle-bot] Price: $${Number(price) / 1e8}`);
 
     const tx = await oracle.updatePrice(price, {
-      gasLimit: 200000, // Reduced gas limit for efficiency
+      gasLimit: 70000, // Reduced gas limit for efficiency
       gasPrice: ethers.parseUnits('1000', 'gwei'),
     });
 
