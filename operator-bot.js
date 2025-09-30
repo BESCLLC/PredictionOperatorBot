@@ -20,11 +20,9 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(OPERATOR_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
-// Oracle contract (read-only, just to confirm data freshness)
+// Oracle (read-only)
 const oracleAbi = [
   'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
-  'function decimals() view returns (uint8)',
-  'function description() view returns (string)',
 ];
 const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 
@@ -102,12 +100,12 @@ async function tryExecute(epoch) {
 
   console.log(`[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}`);
 
-  // Must let previous round close
+  // Must let round N-2 be finished before executing N
   let canExecute = true;
-  if (epoch > 1) {
-    const prev = await prediction.rounds(epoch - 1);
-    if (Number(prev.closeTimestamp) === 0 || now < Number(prev.closeTimestamp)) {
-      console.log(`[operator-bot] ⏳ Waiting for prev round ${epoch - 1} to end`);
+  if (epoch >= 2) {
+    const prev2 = await prediction.rounds(epoch - 2);
+    if (Number(prev2.closeTimestamp) === 0 || now < Number(prev2.closeTimestamp)) {
+      console.log(`[operator-bot] ⏳ Waiting for round ${epoch - 2} to end`);
       canExecute = false;
     }
   }
