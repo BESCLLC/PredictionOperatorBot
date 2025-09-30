@@ -19,19 +19,30 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 const oracle = new ethers.Contract(ORACLE_ADDRESS, OracleAbi, wallet);
 
-// Fetch price from CoinGecko
+// Fetch price from Binance.US with retry logic
 async function fetchPrice() {
-  try {
-    const r = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ASSET}&vs_currencies=usd`
-    );
-    const price = r.data?.[ASSET]?.usd;
-    if (!price) throw new Error('Price not found');
-    return BigInt(Math.round(price * 1e8)); // Scale to 1e8
-  } catch (err) {
-    console.error(`[oracle-bot] ❌ Fetch price error: ${err.message}`);
-    throw err;
+  const maxRetries = 5;
+  let attempt = 1;
+
+  while (attempt <= maxRetries) {
+    try {
+      const r = await axios.get('https://api.binance.us/api/v3/ticker/price?symbol=BTCUSD');
+      const price = Number(r.data.price);
+      if (!price) throw new Error('Price not found');
+      return BigInt(Math.round(price * 1e8)); // Scale to 1e8
+    } catch (err) {
+      if (err.response?.status === 429 && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s, 8s, 16s
+        console.warn(`[oracle-bot] Rate limit (429), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        attempt++;
+      } else {
+        console.error(`[oracle-bot] ❌ Fetch price error: ${err.message}`);
+        throw err;
+      }
+    }
   }
+  throw new Error('Max retries reached for Binance.US API');
 }
 
 async function updateOracle() {
