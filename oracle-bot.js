@@ -50,22 +50,42 @@ async function updateOracle() {
     const price = await fetchPrice();
     console.log(`[oracle-bot] Price: $${Number(price) / 1e8}`);
 
-    // Check pending and confirmed nonces to detect stuck transactions
+    // Check pending and confirmed nonces
     const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending');
     const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest');
     console.log(`[oracle-bot] Pending nonce: ${pendingNonce}, Confirmed nonce: ${confirmedNonce}`);
 
-    // Use pending nonce to avoid conflicts, but warn if gap is large
+    // Use pending nonce unless gap is too large
     let nonce = pendingNonce;
     if (pendingNonce > confirmedNonce + 10) {
       console.warn(`[oracle-bot] ⚠️ Large nonce gap detected, resetting to confirmed nonce: ${confirmedNonce}`);
       nonce = confirmedNonce;
     }
 
+    // Attempt to replace stuck transactions with higher gas price
+    if (pendingNonce > confirmedNonce) {
+      console.log(`[oracle-bot] Attempting to replace stuck transactions with higher gas price`);
+      for (let i = confirmedNonce; i < pendingNonce; i++) {
+        try {
+          const tx = await oracle.updatePrice(price, {
+            gasLimit: 200000,
+            gasPrice: ethers.parseUnits('1500', 'gwei'), // Higher gas price to replace
+            nonce: i,
+          });
+          console.log(`[oracle-bot] Replacement Tx sent: ${tx.hash}, nonce: ${i}`);
+          await tx.wait(2);
+        } catch (err) {
+          console.error(`[oracle-bot] ❌ Replacement Tx failed for nonce ${i}: ${err.message}`);
+        }
+      }
+      // Recheck nonce after replacement
+      nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    }
+
     const tx = await oracle.updatePrice(price, {
       gasLimit: 200000, // Reduced gas limit for efficiency
       gasPrice: ethers.parseUnits('1000', 'gwei'),
-      nonce, // Dynamic nonce to prevent mismatch
+      nonce, // Dynamic nonce
     });
 
     console.log(`[oracle-bot] Tx sent: ${tx.hash}, nonce: ${nonce}`);
