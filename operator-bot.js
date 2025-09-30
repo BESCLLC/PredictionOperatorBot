@@ -9,7 +9,7 @@ const {
   ORACLE_ADDRESS,
   CHECK_INTERVAL = 1000, // 1s
   GAS_LIMIT = 500000,
-  BUFFER_SECONDS = 30,   // Must match contract
+  BUFFER_SECONDS = 30,   // must match contract
 } = process.env;
 
 if (!RPC_URL || !PREDICTION_ADDRESS || !OPERATOR_KEY || !ORACLE_ADDRESS) {
@@ -20,12 +20,11 @@ const provider = new ethers.JsonRpcProvider(RPC_URL);
 const wallet = new ethers.Wallet(OPERATOR_KEY, provider);
 const prediction = new ethers.Contract(PREDICTION_ADDRESS, PredictionAbi, wallet);
 
-// Oracle contract
+// Oracle contract (read-only, just to confirm data freshness)
 const oracleAbi = [
   'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
   'function decimals() view returns (uint8)',
   'function description() view returns (string)',
-  'function version() view returns (uint256)',
 ];
 const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 
@@ -60,20 +59,15 @@ async function sendTx(fn) {
 
 // --- Genesis bootstrap ---
 async function bootstrapGenesis() {
-  const startOnce = await prediction.genesisStartOnce({ blockTag: 'latest' });
-  const lockOnce = await prediction.genesisLockOnce({ blockTag: 'latest' });
+  const startOnce = await prediction.genesisStartOnce();
+  const lockOnce = await prediction.genesisLockOnce();
   console.log(`[operator-bot] Genesis - StartOnce=${startOnce}, LockOnce=${lockOnce}`);
 
   if (!startOnce) {
-    try {
-      const r = await sendTx(opts => prediction.genesisStartRound(opts));
-      console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
-      await sleep(1000);
-      return true;
-    } catch (err) {
-      console.error(`[operator-bot] ❌ genesisStartRound failed: ${err.message}`);
-      return false;
-    }
+    const r = await sendTx(opts => prediction.genesisStartRound(opts));
+    console.log(`[operator-bot] ✅ genesisStartRound (${r.hash})`);
+    await sleep(1000);
+    return true;
   }
 
   if (startOnce && !lockOnce) {
@@ -87,126 +81,82 @@ async function bootstrapGenesis() {
       return false;
     }
 
-    try {
-      const r = await sendTx(opts => prediction.genesisLockRound(opts));
-      console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
-      await sleep(1000);
-      return true;
-    } catch (err) {
-      console.error(`[operator-bot] ❌ genesisLockRound failed: ${err.message}`);
-      return false;
-    }
+    const r = await sendTx(opts => prediction.genesisLockRound(opts));
+    console.log(`[operator-bot] ✅ genesisLockRound (${r.hash})`);
+    await sleep(1000);
+    return true;
   }
-
   return false;
 }
 
-// --- Try execute an epoch ---
+// --- Try to execute a round ---
 async function tryExecute(epoch) {
   if (epoch <= lastHandledEpoch) return false;
 
   const now = Math.floor(Date.now() / 1000);
   const lastAttempt = lastAttemptedEpochs.get(epoch) || 0;
-  if (now - lastAttempt < 30) {
-    console.log(`[operator-bot] ⏳ Cooldown skip epoch ${epoch}`);
-    return false;
-  }
+  if (now - lastAttempt < 30) return false;
 
   const round = await prediction.rounds(epoch);
   const lockTime = Number(round.lockTimestamp);
-  const oracleCalled = round.oracleCalled;
 
-  console.log(`[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}, OracleCalled=${oracleCalled}`);
+  console.log(`[operator-bot] Checking epoch ${epoch}: Now=${ts(now)}, Lock=${ts(lockTime)}`);
 
-  // Check previous round (must be ended)
-  let canEndPrevious = true;
-  if (epoch >= 1) {
-    const prevRound = await prediction.rounds(epoch - 1);
-    console.log(`[operator-bot] Previous round (epoch ${epoch - 1}): close=${ts(Number(prevRound.closeTimestamp))}, oracleCalled=${prevRound.oracleCalled}`);
-    if (Number(prevRound.closeTimestamp) === 0 || now < Number(prevRound.closeTimestamp)) {
+  // Must let previous round close
+  let canExecute = true;
+  if (epoch > 1) {
+    const prev = await prediction.rounds(epoch - 1);
+    if (Number(prev.closeTimestamp) === 0 || now < Number(prev.closeTimestamp)) {
       console.log(`[operator-bot] ⏳ Waiting for prev round ${epoch - 1} to end`);
-      canEndPrevious = false;
+      canExecute = false;
     }
   }
 
-  const EXECUTION_WINDOW_START = lockTime;
-  const EXECUTION_WINDOW_END = lockTime + Number(BUFFER_SECONDS);
+  const windowStart = lockTime;
+  const windowEnd = lockTime + Number(BUFFER_SECONDS);
 
-  if (lockTime > 0 && now >= EXECUTION_WINDOW_START && now <= EXECUTION_WINDOW_END && canEndPrevious) {
+  if (lockTime > 0 && now >= windowStart && now <= windowEnd && canExecute) {
     try {
       const oracleData = await oracle.latestRoundData();
-      const oracleRoundId = Number(oracleData[0]);
-      const oracleTimestamp = Number(oracleData[3]);
-      const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
-      const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
+      console.log(`[operator-bot] Oracle roundId=${Number(oracleData[0])}, ts=${ts(Number(oracleData[3]))}`);
 
-      console.log(`[operator-bot] Oracle check: roundId=${oracleRoundId}, contract=${oracleLatestRoundId}, ts=${ts(oracleTimestamp)}`);
-
-      if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
-        console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
-        txPending = true;
-        lastAttemptedEpochs.set(epoch, now);
-        try {
-          const r = await sendTx(opts => prediction.executeRound(opts));
-          console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
-          lastHandledEpoch = epoch;
-          txPending = false;
-          return true;
-        } catch (err) {
-          console.error(`[operator-bot] ❌ Execute failed: ${err.message}`);
-          txPending = false;
-        }
-      } else {
-        console.log(`[operator-bot] ❌ Oracle data not fresh for epoch ${epoch}`);
-      }
+      console.log(`[operator-bot] ▶ Executing epoch ${epoch}`);
+      txPending = true;
+      lastAttemptedEpochs.set(epoch, now);
+      const r = await sendTx(opts => prediction.executeRound(opts));
+      console.log(`[operator-bot] 🎯 Success: epoch ${epoch} (${r.hash})`);
+      lastHandledEpoch = epoch;
+      txPending = false;
+      return true;
     } catch (err) {
-      console.error(`[operator-bot] ❌ Oracle check failed: ${err.message}`);
+      console.error(`[operator-bot] ❌ Execute failed: ${err.message}`);
+      txPending = false;
     }
-  }
-
-  if (lockTime > 0 && now > lockTime + Number(BUFFER_SECONDS)) {
-    console.log(`[operator-bot] ⏩ Missed epoch ${epoch}`);
   }
   return false;
 }
 
-// --- Recover stuck rounds ---
+// --- Recovery for stuck rounds ---
 async function recoverStuckRounds(currentEpoch) {
   const now = Math.floor(Date.now() / 1000);
   for (let epoch = Math.max(currentEpoch - 5, 1); epoch <= currentEpoch; epoch++) {
     if (epoch <= lastHandledEpoch) continue;
     const round = await prediction.rounds(epoch);
-    const lockTime = Number(round.lockTimestamp);
     const closeTime = Number(round.closeTimestamp);
-    const oracleCalled = round.oracleCalled;
 
-    console.log(`[operator-bot] Recovery check ${epoch}: lock=${ts(lockTime)}, close=${ts(closeTime)}, oracleCalled=${oracleCalled}`);
-
-    if (lockTime > 0 && closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS)) {
+    if (closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS)) {
+      console.log(`[operator-bot] ▶ Recovering stuck epoch ${epoch}`);
       try {
-        const oracleData = await oracle.latestRoundData();
-        const oracleRoundId = Number(oracleData[0]);
-        const oracleTimestamp = Number(oracleData[3]);
-        const oracleLatestRoundId = Number(await prediction.oracleLatestRoundId());
-        const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
-
-        if (oracleRoundId > oracleLatestRoundId && oracleTimestamp <= now + oracleUpdateAllowance) {
-          console.log(`[operator-bot] ▶ Recovering stuck epoch ${epoch}`);
-          txPending = true;
-          lastAttemptedEpochs.set(epoch, now);
-          try {
-            const r = await sendTx(opts => prediction.executeRound(opts));
-            console.log(`[operator-bot] 🎯 Recovery success: epoch ${epoch} (${r.hash})`);
-            lastHandledEpoch = epoch;
-            txPending = false;
-            return true;
-          } catch (err) {
-            console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
-            txPending = false;
-          }
-        }
+        txPending = true;
+        lastAttemptedEpochs.set(epoch, now);
+        const r = await sendTx(opts => prediction.executeRound(opts));
+        console.log(`[operator-bot] 🎯 Recovery success: epoch ${epoch} (${r.hash})`);
+        lastHandledEpoch = epoch;
+        txPending = false;
+        return true;
       } catch (err) {
-        console.error(`[operator-bot] ❌ Recovery oracle failed: ${err.message}`);
+        console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
+        txPending = false;
       }
     }
   }
@@ -219,7 +169,7 @@ async function checkAndExecute() {
   try {
     const contractBuffer = await prediction.bufferSeconds();
     if (Number(contractBuffer) !== Number(BUFFER_SECONDS)) {
-      console.error(`[operator-bot] ⚠ BUFFER_SECONDS mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
+      console.error(`[operator-bot] ⚠ Buffer mismatch: env=${BUFFER_SECONDS}, contract=${contractBuffer}`);
     }
 
     if (await bootstrapGenesis()) return;
@@ -244,14 +194,11 @@ async function checkAndExecute() {
 setInterval(async () => {
   try {
     const epoch = Number(await prediction.currentEpoch());
-    const oracleRoundId = Number(await prediction.oracleLatestRoundId());
     const paused = await prediction.paused();
     const startOnce = await prediction.genesisStartOnce();
     const lockOnce = await prediction.genesisLockOnce();
-    const oracleUpdateAllowance = Number(await prediction.oracleUpdateAllowance());
-    const oracleData = await oracle.latestRoundData();
     const round = await prediction.rounds(epoch);
-    console.log(`[monitor] Epoch=${epoch}, OracleID=${oracleRoundId}, paused=${paused}, GenesisStart=${startOnce}, GenesisLock=${lockOnce}, allowance=${oracleUpdateAllowance}, OracleData={roundId=${Number(oracleData[0])}, price=${Number(oracleData[1])}, ts=${ts(Number(oracleData[3]))}}, CurrentRound={lock=${ts(Number(round.lockTimestamp))}, oracleCalled=${round.oracleCalled}}`);
+    console.log(`[monitor] Epoch=${epoch}, paused=${paused}, GenesisStart=${startOnce}, GenesisLock=${lockOnce}, Round={lock=${ts(Number(round.lockTimestamp))}, close=${ts(Number(round.closeTimestamp))}, oracleCalled=${round.oracleCalled}}`);
   } catch (err) {
     console.error(`[monitor] ❌ ${err.message}`);
   }
