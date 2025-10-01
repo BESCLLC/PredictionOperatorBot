@@ -44,18 +44,21 @@ async function fetchPrice() {
   }
 }
 
-// --- Push oracle update with nonce safety ---
+// --- Push oracle update with strict nonce handling ---
 async function pushPrice(price) {
   const baseGas = ethers.parseUnits(GAS_PRICE_GWEI.toString(), 'gwei')
 
   const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending')
   const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest')
 
-  // Use confirmed if pending drifts too far ahead
-  let nonce = pendingNonce
-  if (pendingNonce > confirmedNonce + 2) {
-    console.warn(`[oracle-bot] ⚠ Nonce gap detected (pending=${pendingNonce}, confirmed=${confirmedNonce}), falling back to confirmed`)
-    nonce = confirmedNonce
+  // Default to confirmed to avoid "nonce too distant"
+  let nonce = confirmedNonce
+
+  // Allow only +1 drift if pending is exactly next in line
+  if (pendingNonce === confirmedNonce + 1) {
+    nonce = pendingNonce
+  } else if (pendingNonce > confirmedNonce + 1) {
+    console.warn(`[oracle-bot] ⚠ Nonce gap too large (pending=${pendingNonce}, confirmed=${confirmedNonce}), forcing confirmed=${confirmedNonce}`)
   }
 
   const tx = await oracle.updatePrice(price, {
