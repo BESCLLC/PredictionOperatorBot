@@ -35,34 +35,22 @@ function ts(unix) {
 }
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// --- Safe sendTx with nonce + gas bumping ---
 async function sendTx(fn) {
-  const baseGas = ethers.parseUnits('1000', 'gwei');
-
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending');
-      const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest');
-      let nonce = pendingNonce;
-      if (pendingNonce > confirmedNonce + 5) {
-        console.warn(`[operator-bot] ⚠ Nonce gap detected, using confirmed=${confirmedNonce}`);
-        nonce = confirmedNonce;
-      }
-
-      const gasPrice = (baseGas * BigInt(100 + attempt * 10)) / BigInt(100); // bump 10% per retry
+      const nonce = await provider.getTransactionCount(wallet.address, 'pending');
       const tx = await fn({
         gasLimit: Number(GAS_LIMIT),
-        gasPrice,
+        gasPrice: ethers.parseUnits('1000', 'gwei'),
         nonce,
       });
-
-      console.log(`[operator-bot] 🚀 Tx sent: ${tx.hash}, nonce=${nonce}, gasPrice=${ethers.formatUnits(gasPrice, 'gwei')} gwei`);
+      console.log(`[operator-bot] 🚀 Tx sent: ${tx.hash}, nonce=${nonce}`);
       const receipt = await tx.wait(2);
       return receipt;
     } catch (err) {
       console.error(`[operator-bot] ❌ Tx failed (try ${attempt}): ${err.message}`);
       if (attempt === 5) throw err;
-      await sleep(2000);
+      await sleep(1000);
     }
   }
 }
