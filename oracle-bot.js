@@ -44,30 +44,16 @@ async function fetchPrice() {
   }
 }
 
-// --- Push oracle update with strict nonce handling ---
-async function pushPrice(price) {
-  const baseGas = ethers.parseUnits(GAS_PRICE_GWEI.toString(), 'gwei')
-
-  const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending')
-  const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest')
-
-  // Default to confirmed to avoid "nonce too distant"
-  let nonce = confirmedNonce
-
-  // Allow only +1 drift if pending is exactly next in line
-  if (pendingNonce === confirmedNonce + 1) {
-    nonce = pendingNonce
-  } else if (pendingNonce > confirmedNonce + 1) {
-    console.warn(`[oracle-bot] ⚠ Nonce gap too large (pending=${pendingNonce}, confirmed=${confirmedNonce}), forcing confirmed=${confirmedNonce}`)
-  }
-
-  const tx = await oracle.updatePrice(price, {
+// --- Push oracle update ---
+async function pushPrice(price, nonceOverride) {
+  const opts = {
     gasLimit: GAS_LIMIT,
-    gasPrice: baseGas,
-    nonce,
-  })
+    gasPrice: ethers.parseUnits(GAS_PRICE_GWEI.toString(), 'gwei'),
+  }
+  if (nonceOverride !== undefined) opts.nonce = nonceOverride
 
-  console.log(`[oracle-bot] 🚀 Oracle update tx: ${tx.hash}, price=$${Number(price) / 1e8}, nonce=${nonce}`)
+  const tx = await oracle.updatePrice(price, opts)
+  console.log(`[oracle-bot] 🚀 Oracle update tx: ${tx.hash}, price=$${Number(price) / 1e8}`)
   await tx.wait(2)
   console.log(`[oracle-bot] ✅ Price confirmed on-chain`)
 }
@@ -84,7 +70,16 @@ async function loop() {
     const price = await fetchPrice()
     if (!price) return
 
-    await pushPrice(price)
+    // Nonce safety
+    const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending')
+    const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest')
+    let nonce = pendingNonce
+    if (pendingNonce > confirmedNonce + 5) {
+      console.warn(`[oracle-bot] ⚠️ Nonce gap detected, using confirmed=${confirmedNonce}`)
+      nonce = confirmedNonce
+    }
+
+    await pushPrice(price, nonce)
   } catch (err) {
     console.error(`[oracle-bot] ❌ Loop error: ${err.message}`)
   }
