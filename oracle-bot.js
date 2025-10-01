@@ -44,16 +44,27 @@ async function fetchPrice() {
   }
 }
 
-// --- Push oracle update ---
-async function pushPrice(price, nonceOverride) {
-  const opts = {
-    gasLimit: GAS_LIMIT,
-    gasPrice: ethers.parseUnits(GAS_PRICE_GWEI.toString(), 'gwei'),
-  }
-  if (nonceOverride !== undefined) opts.nonce = nonceOverride
+// --- Push oracle update with nonce safety ---
+async function pushPrice(price) {
+  const baseGas = ethers.parseUnits(GAS_PRICE_GWEI.toString(), 'gwei')
 
-  const tx = await oracle.updatePrice(price, opts)
-  console.log(`[oracle-bot] 🚀 Oracle update tx: ${tx.hash}, price=$${Number(price) / 1e8}`)
+  const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending')
+  const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest')
+
+  // Use confirmed if pending drifts too far ahead
+  let nonce = pendingNonce
+  if (pendingNonce > confirmedNonce + 2) {
+    console.warn(`[oracle-bot] ⚠ Nonce gap detected (pending=${pendingNonce}, confirmed=${confirmedNonce}), falling back to confirmed`)
+    nonce = confirmedNonce
+  }
+
+  const tx = await oracle.updatePrice(price, {
+    gasLimit: GAS_LIMIT,
+    gasPrice: baseGas,
+    nonce,
+  })
+
+  console.log(`[oracle-bot] 🚀 Oracle update tx: ${tx.hash}, price=$${Number(price) / 1e8}, nonce=${nonce}`)
   await tx.wait(2)
   console.log(`[oracle-bot] ✅ Price confirmed on-chain`)
 }
@@ -70,16 +81,7 @@ async function loop() {
     const price = await fetchPrice()
     if (!price) return
 
-    // Nonce safety
-    const pendingNonce = await provider.getTransactionCount(wallet.address, 'pending')
-    const confirmedNonce = await provider.getTransactionCount(wallet.address, 'latest')
-    let nonce = pendingNonce
-    if (pendingNonce > confirmedNonce + 5) {
-      console.warn(`[oracle-bot] ⚠️ Nonce gap detected, using confirmed=${confirmedNonce}`)
-      nonce = confirmedNonce
-    }
-
-    await pushPrice(price, nonce)
+    await pushPrice(price)
   } catch (err) {
     console.error(`[oracle-bot] ❌ Loop error: ${err.message}`)
   }
