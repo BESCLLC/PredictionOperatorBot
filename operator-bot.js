@@ -73,10 +73,14 @@ async function bootstrapGenesis() {
     const round = await prediction.rounds(currentEpoch);
     const now = Math.floor(Date.now() / 1000);
     const lockTime = Number(round.lockTimestamp);
+    const bufferSeconds = Number(BUFFER_SECONDS); // Or await prediction.bufferSeconds() to fetch from contract
 
     if (now < lockTime) {
       console.log(`[operator-bot] ⏳ Waiting for genesis lock window: Now=${ts(now)}, Lock=${ts(lockTime)}`);
       return false;
+    } else if (now > lockTime + bufferSeconds) {
+      console.log(`[operator-bot] ❌ Missed genesis lock window: Now=${ts(now)}, Window=${ts(lockTime)} to ${ts(lockTime + bufferSeconds)}`);
+      return false; // Prevent further attempts; manual intervention may be needed
     }
 
     const r = await sendTx(opts => prediction.genesisLockRound(opts));
