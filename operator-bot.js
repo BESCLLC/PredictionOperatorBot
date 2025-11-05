@@ -29,6 +29,7 @@ const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 let txPending = false;
 let lastHandledEpoch = 0;
 const lastAttemptedEpochs = new Map();
+let nextPositionIsBull = Math.random() < 0.5; // Start with random
 
 function ts(unix) {
   return new Date(Number(unix) * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
@@ -89,6 +90,33 @@ async function bootstrapGenesis() {
     return true;
   }
   return false;
+}
+
+// --- Try to bet on the current round ---
+async function tryBet(epoch) {
+  const round = await prediction.rounds(epoch);
+  const now = Math.floor(Date.now() / 1000);
+
+  if (now <= Number(round.startTimestamp) || now >= Number(round.lockTimestamp)) return;
+
+  const betInfo = await prediction.ledger(epoch, wallet.address);
+
+  if (Number(betInfo.amount) > 0) return;
+
+  const position = nextPositionIsBull ? 'betBull' : 'betBear';
+  const amount = ethers.parseUnits('2.5', 18);
+
+  console.log(`[operator-bot] ▶ Betting ${position} on epoch ${epoch} with ${amount}`);
+
+  txPending = true;
+  try {
+    const r = await sendTx(opts => prediction[position](epoch, amount, opts));
+    console.log(`[operator-bot] 🎯 Bet placed: epoch ${epoch} (${r.hash})`);
+    nextPositionIsBull = !nextPositionIsBull; // Rotate for next
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Bet failed: ${err.message}`);
+  }
+  txPending = false;
 }
 
 // --- Try to execute a round ---
@@ -186,6 +214,8 @@ async function checkAndExecute() {
         if (executed) break;
       }
     }
+
+    await tryBet(currentEpoch);
   } catch (err) {
     console.error(`[operator-bot] ❌ Main error: ${err.message}`);
     txPending = false;
@@ -215,6 +245,20 @@ provider.on('error', err => console.error(`[operator-bot] ❌ RPC error: ${err.m
       console.error(`[operator-bot] ❌ Wallet ${wallet.address} is not operator (${operator})`);
     } else {
       console.log(`[operator-bot] ✅ Wallet ${wallet.address} is operator`);
+    }
+
+    const tokenAddress = await prediction.token();
+    const tokenAbi = [
+      'function allowance(address owner, address spender) view returns (uint256)',
+      'function approve(address spender, uint256 amount) returns (bool)',
+    ];
+    const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, wallet);
+    const allowance = await tokenContract.allowance(wallet.address, PREDICTION_ADDRESS);
+    if (allowance < ethers.parseUnits('2.5', 18)) {
+      console.log(`[operator-bot] Approving prediction contract for betting`);
+      const tx = await tokenContract.approve(PREDICTION_ADDRESS, ethers.MaxUint256);
+      await tx.wait();
+      console.log(`[operator-bot] Approval done`);
     }
   } catch (err) {
     console.error(`[operator-bot] ❌ Operator check failed: ${err.message}`);
