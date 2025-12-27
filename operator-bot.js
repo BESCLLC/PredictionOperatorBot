@@ -104,7 +104,7 @@ async function tryBet(epoch) {
   if (Number(betInfo.amount) > 0) return;
 
   const position = nextPositionIsBull ? 'betBull' : 'betBear';
-  const amount = ethers.parseUnits('2.5', 18);
+  const amount = ethers.parseUnits('0.5', 18);
 
   console.log(`[operator-bot] ▶ Betting ${position} on epoch ${epoch} with ${amount}`);
 
