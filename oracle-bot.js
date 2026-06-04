@@ -34,7 +34,7 @@ async function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 // --- Fetch Binance price ---
 async function fetchPrice() {
   try {
-    const r = await axios.get('https://api.binance.us/api/v3/ticker/price?symbol=BTCUSD')
+    const r = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
     const price = Number(r.data.price)
     if (!price) throw new Error('Price not found')
     return BigInt(Math.round(price * 1e8)) // scale to 1e8
