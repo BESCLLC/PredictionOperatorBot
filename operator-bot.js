@@ -78,10 +78,10 @@ async function bootstrapGenesis() {
 
     if (now < lockTime) {
       console.log(`[operator-bot] ⏳ Waiting for genesis lock window: Now=${ts(now)}, Lock=${ts(lockTime)}`);
-      return false;
+      return true; // Block recovery/betting while genesis lock is pending
     } else if (now > lockTime + bufferSeconds) {
       console.log(`[operator-bot] ❌ Missed genesis lock window: Now=${ts(now)}, Window=${ts(lockTime)} to ${ts(lockTime + bufferSeconds)}`);
-      return false; // Prevent further attempts; manual intervention may be needed
+      return true; // Block further attempts — genesis broken, needs manual intervention
     }
 
     const r = await sendTx(opts => prediction.genesisLockRound(opts));
