@@ -174,18 +174,24 @@ async function recoverStuckRounds(currentEpoch) {
     const round = await prediction.rounds(epoch);
     const closeTime = Number(round.closeTimestamp);
 
-    if (closeTime > 0 && now >= closeTime && now <= closeTime + Number(BUFFER_SECONDS)) {
-      console.log(`[operator-bot] ▶ Recovering stuck epoch ${epoch}`);
+    if (closeTime > 0 && now >= closeTime) {
+      const lastAttempt = lastAttemptedEpochs.get(`recover-${epoch}`) || 0;
+      const isStale = now > closeTime + Number(BUFFER_SECONDS);
+      // Stale epochs (past the normal buffer) are retried at most every 5 minutes
+      // to avoid spamming the contract while still making progress after downtime.
+      if (isStale && now - lastAttempt < 300) continue;
+
+      console.log(`[operator-bot] ▶ Recovering ${isStale ? 'stale' : 'stuck'} epoch ${epoch} (closeTime=${ts(closeTime)})`);
       try {
         txPending = true;
-        lastAttemptedEpochs.set(epoch, now);
+        lastAttemptedEpochs.set(`recover-${epoch}`, now);
         const r = await sendTx(opts => prediction.executeRound(opts));
         console.log(`[operator-bot] 🎯 Recovery success: epoch ${epoch} (${r.hash})`);
         lastHandledEpoch = epoch;
         txPending = false;
         return true;
       } catch (err) {
-        console.error(`[operator-bot] ❌ Recovery failed: ${err.message}`);
+        console.error(`[operator-bot] ❌ Recovery failed for epoch ${epoch}: ${err.message}`);
         txPending = false;
       }
     }
