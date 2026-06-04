@@ -31,17 +31,30 @@ function ts(unix) {
 }
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-// --- Fetch Binance price ---
+// --- Fetch BTC price with fallback ---
 async function fetchPrice() {
+  // Primary: Binance.US BTCUSDT
   try {
-    const r = await axios.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
+    const r = await axios.get('https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT', { timeout: 5000 })
     const price = Number(r.data.price)
-    if (!price) throw new Error('Price not found')
-    return BigInt(Math.round(price * 1e8)) // scale to 1e8
+    if (price) return BigInt(Math.round(price * 1e8))
   } catch (err) {
-    console.error(`[oracle-bot] ❌ Fetch error: ${err.message}`)
-    return null
+    console.warn(`[oracle-bot] ⚠️ Binance.US failed: ${err.message}, trying fallback`)
   }
+
+  // Fallback: CoinGecko (no geo-block)
+  try {
+    const r = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd', { timeout: 5000 })
+    const price = Number(r.data?.bitcoin?.usd)
+    if (price) {
+      console.log(`[oracle-bot] ℹ️ Using CoinGecko fallback price`)
+      return BigInt(Math.round(price * 1e8))
+    }
+  } catch (err) {
+    console.error(`[oracle-bot] ❌ CoinGecko fallback failed: ${err.message}`)
+  }
+
+  return null
 }
 
 // --- Push oracle update ---
