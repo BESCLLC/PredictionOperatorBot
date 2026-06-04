@@ -167,34 +167,33 @@ async function tryExecute(epoch) {
 }
 
 // --- Recovery for stuck rounds ---
+// executeRound() has no epoch param — it always acts on currentEpoch.
+// Only attempt recovery for the current epoch after its lock window has passed.
 async function recoverStuckRounds(currentEpoch) {
+  if (currentEpoch <= lastHandledEpoch) return false;
+
   const now = Math.floor(Date.now() / 1000);
-  for (let epoch = Math.max(currentEpoch - 5, 1); epoch <= currentEpoch; epoch++) {
-    if (epoch <= lastHandledEpoch) continue;
-    const round = await prediction.rounds(epoch);
-    const closeTime = Number(round.closeTimestamp);
+  const round = await prediction.rounds(currentEpoch);
+  const lockTime = Number(round.lockTimestamp);
 
-    if (closeTime > 0 && now >= closeTime) {
-      const lastAttempt = lastAttemptedEpochs.get(`recover-${epoch}`) || 0;
-      const isStale = now > closeTime + Number(BUFFER_SECONDS);
-      // Stale epochs (past the normal buffer) are retried at most every 5 minutes
-      // to avoid spamming the contract while still making progress after downtime.
-      if (isStale && now - lastAttempt < 300) continue;
+  // Not yet past the normal execution window — tryExecute handles this
+  if (lockTime === 0 || now < lockTime + Number(BUFFER_SECONDS)) return false;
 
-      console.log(`[operator-bot] ▶ Recovering ${isStale ? 'stale' : 'stuck'} epoch ${epoch} (closeTime=${ts(closeTime)})`);
-      try {
-        txPending = true;
-        lastAttemptedEpochs.set(`recover-${epoch}`, now);
-        const r = await sendTx(opts => prediction.executeRound(opts));
-        console.log(`[operator-bot] 🎯 Recovery success: epoch ${epoch} (${r.hash})`);
-        lastHandledEpoch = epoch;
-        txPending = false;
-        return true;
-      } catch (err) {
-        console.error(`[operator-bot] ❌ Recovery failed for epoch ${epoch}: ${err.message}`);
-        txPending = false;
-      }
-    }
+  const lastAttempt = lastAttemptedEpochs.get(`recover-${currentEpoch}`) || 0;
+  if (now - lastAttempt < 300) return false; // retry at most every 5 minutes
+
+  console.log(`[operator-bot] ▶ Recovering missed epoch ${currentEpoch} (lockTime=${ts(lockTime)})`);
+  try {
+    txPending = true;
+    lastAttemptedEpochs.set(`recover-${currentEpoch}`, now);
+    const r = await sendTx(opts => prediction.executeRound(opts));
+    console.log(`[operator-bot] 🎯 Recovery success: epoch ${currentEpoch} (${r.hash})`);
+    lastHandledEpoch = currentEpoch;
+    txPending = false;
+    return true;
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Recovery failed for epoch ${currentEpoch}: ${err.message}`);
+    txPending = false;
   }
   return false;
 }
