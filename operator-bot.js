@@ -67,20 +67,33 @@ async function tryResetViaUnpause(currentEpoch) {
   const now = Math.floor(Date.now() / 1000);
   if (now - lastAttempt < 3600) return false; // try at most once per hour
 
-  console.log(`[operator-bot] 🔄 Epoch ${currentEpoch} is permanently stuck — attempting pause/unpause reset`);
   lastAttemptedEpochs.set(key, now);
+  console.log(`[operator-bot] 🔄 Epoch ${currentEpoch} is permanently stuck — attempting pause/unpause reset`);
+
+  let didPause = false;
   try {
-    const r1 = await sendTx(opts => prediction.pause(opts));
-    console.log(`[operator-bot] ✅ Paused (${r1.hash})`);
-    await sleep(2000);
+    const isPaused = await prediction.paused();
+    if (!isPaused) {
+      const r1 = await sendTx(opts => prediction.pause(opts));
+      console.log(`[operator-bot] ✅ Paused (${r1.hash})`);
+      didPause = true;
+      await sleep(2000);
+    } else {
+      console.log(`[operator-bot] ℹ️ Contract already paused, proceeding to unpause`);
+      didPause = true;
+    }
     const r2 = await sendTx(opts => prediction.unpause(opts));
     console.log(`[operator-bot] ✅ Unpaused — genesis flags reset (${r2.hash})`);
     recoveryFailures.delete(currentEpoch);
     lastHandledEpoch = 0;
     return true;
   } catch (err) {
-    console.error(`[operator-bot] ❌ Pause/unpause failed: ${err.message}`);
-    console.error(`[operator-bot] ⚠️  MANUAL ACTION REQUIRED: call pause() then unpause() on ${PREDICTION_ADDRESS} to reset the stuck epoch`);
+    console.error(`[operator-bot] ❌ Reset failed: ${err.message}`);
+    if (didPause) {
+      console.error(`[operator-bot] ⚠️  CONTRACT IS NOW PAUSED — call unpause() on ${PREDICTION_ADDRESS} to resume`);
+    } else {
+      console.error(`[operator-bot] ⚠️  MANUAL ACTION REQUIRED: call pause() then unpause() on ${PREDICTION_ADDRESS}`);
+    }
     return false;
   }
 }
@@ -213,9 +226,9 @@ async function recoverStuckRounds(currentEpoch) {
 
   const failures = recoveryFailures.get(currentEpoch) || 0;
 
-  // After 2 failed recovery attempts, the contract is enforcing a hard time limit.
+  // After 1 failed recovery attempt, the contract is enforcing a hard time limit.
   // Escalate to pause/unpause reset so genesis can restart cleanly.
-  if (failures >= 2) {
+  if (failures >= 1) {
     return tryResetViaUnpause(currentEpoch);
   }
 
