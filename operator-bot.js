@@ -29,7 +29,9 @@ const oracle = new ethers.Contract(ORACLE_ADDRESS, oracleAbi, provider);
 let txPending = false;
 let lastHandledEpoch = 0;
 const lastAttemptedEpochs = new Map();
-let nextPositionIsBull = Math.random() < 0.5; // Start with random
+const recoveryFailures = new Map(); // epoch -> failure count
+let pauseUnpauseAttempted = false;
+let nextPositionIsBull = Math.random() < 0.5;
 
 function ts(unix) {
   return new Date(Number(unix) * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC');
@@ -56,6 +58,33 @@ async function sendTx(fn) {
   }
 }
 
+// --- Pause/unpause to reset a stuck genesis ---
+// In PancakePrediction V3, unpause() resets genesisStartOnce and genesisLockOnce.
+// pause() requires admin or operator; unpause() may require admin only.
+async function tryResetViaUnpause(currentEpoch) {
+  const key = `pauseUnpause-${currentEpoch}`;
+  const lastAttempt = lastAttemptedEpochs.get(key) || 0;
+  const now = Math.floor(Date.now() / 1000);
+  if (now - lastAttempt < 3600) return false; // try at most once per hour
+
+  console.log(`[operator-bot] 🔄 Epoch ${currentEpoch} is permanently stuck — attempting pause/unpause reset`);
+  lastAttemptedEpochs.set(key, now);
+  try {
+    const r1 = await sendTx(opts => prediction.pause(opts));
+    console.log(`[operator-bot] ✅ Paused (${r1.hash})`);
+    await sleep(2000);
+    const r2 = await sendTx(opts => prediction.unpause(opts));
+    console.log(`[operator-bot] ✅ Unpaused — genesis flags reset (${r2.hash})`);
+    recoveryFailures.delete(currentEpoch);
+    lastHandledEpoch = 0;
+    return true;
+  } catch (err) {
+    console.error(`[operator-bot] ❌ Pause/unpause failed: ${err.message}`);
+    console.error(`[operator-bot] ⚠️  MANUAL ACTION REQUIRED: call pause() then unpause() on ${PREDICTION_ADDRESS} to reset the stuck epoch`);
+    return false;
+  }
+}
+
 // --- Genesis bootstrap ---
 async function bootstrapGenesis() {
   const startOnce = await prediction.genesisStartOnce();
@@ -74,14 +103,16 @@ async function bootstrapGenesis() {
     const round = await prediction.rounds(currentEpoch);
     const now = Math.floor(Date.now() / 1000);
     const lockTime = Number(round.lockTimestamp);
-    const bufferSeconds = Number(BUFFER_SECONDS); // Or await prediction.bufferSeconds() to fetch from contract
+    const bufferSeconds = Number(BUFFER_SECONDS);
 
     if (now < lockTime) {
       console.log(`[operator-bot] ⏳ Waiting for genesis lock window: Now=${ts(now)}, Lock=${ts(lockTime)}`);
       return true; // Block recovery/betting while genesis lock is pending
     } else if (now > lockTime + bufferSeconds) {
       console.log(`[operator-bot] ❌ Missed genesis lock window: Now=${ts(now)}, Window=${ts(lockTime)} to ${ts(lockTime + bufferSeconds)}`);
-      return true; // Block further attempts — genesis broken, needs manual intervention
+      // Missed the genesis lock window — reset and try again
+      await tryResetViaUnpause(currentEpoch);
+      return true;
     }
 
     const r = await sendTx(opts => prediction.genesisLockRound(opts));
@@ -112,7 +143,7 @@ async function tryBet(epoch) {
   try {
     const r = await sendTx(opts => prediction[position](epoch, amount, opts));
     console.log(`[operator-bot] 🎯 Bet placed: epoch ${epoch} (${r.hash})`);
-    nextPositionIsBull = !nextPositionIsBull; // Rotate for next
+    nextPositionIsBull = !nextPositionIsBull;
   } catch (err) {
     console.error(`[operator-bot] ❌ Bet failed: ${err.message}`);
   }
@@ -169,6 +200,7 @@ async function tryExecute(epoch) {
 // --- Recovery for stuck rounds ---
 // executeRound() has no epoch param — it always acts on currentEpoch.
 // Only attempt recovery for the current epoch after its lock window has passed.
+// After 2 failures, escalate to pause/unpause reset.
 async function recoverStuckRounds(currentEpoch) {
   if (currentEpoch <= lastHandledEpoch) return false;
 
@@ -179,20 +211,30 @@ async function recoverStuckRounds(currentEpoch) {
   // Not yet past the normal execution window — tryExecute handles this
   if (lockTime === 0 || now < lockTime + Number(BUFFER_SECONDS)) return false;
 
+  const failures = recoveryFailures.get(currentEpoch) || 0;
+
+  // After 2 failed recovery attempts, the contract is enforcing a hard time limit.
+  // Escalate to pause/unpause reset so genesis can restart cleanly.
+  if (failures >= 2) {
+    return tryResetViaUnpause(currentEpoch);
+  }
+
   const lastAttempt = lastAttemptedEpochs.get(`recover-${currentEpoch}`) || 0;
   if (now - lastAttempt < 300) return false; // retry at most every 5 minutes
 
-  console.log(`[operator-bot] ▶ Recovering missed epoch ${currentEpoch} (lockTime=${ts(lockTime)})`);
+  console.log(`[operator-bot] ▶ Recovering missed epoch ${currentEpoch} (lockTime=${ts(lockTime)}, attempt ${failures + 1})`);
   try {
     txPending = true;
     lastAttemptedEpochs.set(`recover-${currentEpoch}`, now);
     const r = await sendTx(opts => prediction.executeRound(opts));
     console.log(`[operator-bot] 🎯 Recovery success: epoch ${currentEpoch} (${r.hash})`);
     lastHandledEpoch = currentEpoch;
+    recoveryFailures.delete(currentEpoch);
     txPending = false;
     return true;
   } catch (err) {
     console.error(`[operator-bot] ❌ Recovery failed for epoch ${currentEpoch}: ${err.message}`);
+    recoveryFailures.set(currentEpoch, failures + 1);
     txPending = false;
   }
   return false;
