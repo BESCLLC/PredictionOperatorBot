@@ -140,23 +140,43 @@ async function bootstrapGenesis() {
 async function tryBet(epoch) {
   const round = await prediction.rounds(epoch);
   const now = Math.floor(Date.now() / 1000);
+  const lockTime = Number(round.lockTimestamp);
 
-  if (now <= Number(round.startTimestamp) || now >= Number(round.lockTimestamp)) return;
+  // Skip if outside the bet window
+  if (now <= Number(round.startTimestamp) || now >= lockTime) return;
+
+  // Don't bet in the last 90 seconds before lock — keep the window clear for executeRound
+  if (now >= lockTime - 90) return;
+
+  // Rate-limit: one attempt per epoch, retry at most every 5 minutes on failure
+  const lastAttempt = lastAttemptedEpochs.get(`bet-${epoch}`) || 0;
+  if (now - lastAttempt < 300) return;
 
   const betInfo = await prediction.ledger(epoch, wallet.address);
-
   if (Number(betInfo.amount) > 0) return;
 
   const position = nextPositionIsBull ? 'betBull' : 'betBear';
   const amount = ethers.parseUnits('0.5', 18);
 
   console.log(`[operator-bot] ▶ Betting ${position} on epoch ${epoch} with ${amount}`);
+  lastAttemptedEpochs.set(`bet-${epoch}`, now);
 
   txPending = true;
   try {
-    const r = await sendTx(opts => prediction[position](epoch, amount, opts));
-    console.log(`[operator-bot] 🎯 Bet placed: epoch ${epoch} (${r.hash})`);
-    nextPositionIsBull = !nextPositionIsBull;
+    const nonce = await provider.getTransactionCount(wallet.address, 'pending');
+    const tx = await prediction[position](epoch, amount, {
+      gasLimit: Number(GAS_LIMIT),
+      gasPrice: ethers.parseUnits('1000', 'gwei'),
+      nonce,
+    });
+    console.log(`[operator-bot] 🚀 Bet tx: ${tx.hash}`);
+    const receipt = await tx.wait(2);
+    if (receipt.status === 1) {
+      console.log(`[operator-bot] 🎯 Bet placed: epoch ${epoch} (${tx.hash})`);
+      nextPositionIsBull = !nextPositionIsBull;
+    } else {
+      console.error(`[operator-bot] ❌ Bet reverted on-chain`);
+    }
   } catch (err) {
     console.error(`[operator-bot] ❌ Bet failed: ${err.message}`);
   }
